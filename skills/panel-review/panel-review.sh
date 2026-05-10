@@ -28,6 +28,9 @@ OUT_DIR=""
 TIMEOUT_SECS="${PANEL_REVIEW_TIMEOUT:-600}"
 MAX_DIFF_BYTES="${PANEL_REVIEW_MAX_DIFF_BYTES:-200000}"
 CHECKOUT_MODE=0
+CHECKOUT_REQUESTED=0            # set to 1 by the deprecated --checkout flag, used to
+                                # detect --checkout combined with a target that no
+                                # longer supports a worktree (uncommitted/staged)
 INSTRUCTION_MODE=0             # 1 when target is a PR; panelists fetch via gh themselves
 
 # ----- Per-panelist model overrides (env) -----
@@ -123,10 +126,13 @@ while [[ $# -gt 0 ]]; do
     --timeout)     [[ $# -ge 2 ]] || die "--timeout needs seconds"; TIMEOUT_SECS="$2"; shift 2 ;;
     --checkout)
       # Deprecated: PR / --base / --commit reviews now always run worktree-
-      # isolated with exec permissions. Accepting the flag silently as a no-op
-      # so existing scripts / muscle memory don't break; will be removed in a
-      # future release.
-      echo "panel-review: --checkout is now the default for pr/base/commit targets and is a no-op; the flag will be removed in a future release." >&2
+      # isolated with exec permissions. Accepting the flag as a no-op for those
+      # targets so existing scripts / muscle memory don't break; will be removed
+      # in a future release. Combined with --uncommitted/--staged the flag is an
+      # error (see post-parse check below) — those targets cannot be worktree-
+      # isolated, so silently dropping --checkout would give the user a
+      # read-only review when they explicitly asked for deep mode.
+      CHECKOUT_REQUESTED=1
       shift ;;
     -h|--help)     usage; exit 0 ;;
     *) die "unknown argument: $1 (use -h for help)" ;;
@@ -176,6 +182,23 @@ if (( !TARGET_EXPLICIT )) && command -v gh >/dev/null 2>&1 && command -v git >/d
       echo "panel-review: branch has PR #$auto_pr_num (state: $auto_pr_state) — not auto-switching. Pass --pr $auto_pr_num explicitly to review it anyway." >&2
     fi
   fi
+fi
+
+# Validate --checkout against the resolved target. For pr/base/commit it's a
+# no-op (worktree is already the default). For uncommitted/staged it's an
+# error: those targets have no committed ref to materialize a worktree from,
+# so the previous behavior of silently dropping the flag would surprise users
+# who explicitly requested deep mode. Telling them up-front lets them either
+# commit/stash first or drop the flag.
+if (( CHECKOUT_REQUESTED )); then
+  case "$TARGET" in
+    uncommitted|staged)
+      die "--checkout cannot be combined with --$TARGET: there is no committed ref to materialize a worktree from. Either drop --checkout (you'll get a local read-only review) or commit/stash your changes first and re-run with --base or --commit."
+      ;;
+    *)
+      echo "panel-review: --checkout is now the default for pr/base/commit targets and is a no-op; the flag will be removed in a future release." >&2
+      ;;
+  esac
 fi
 
 # Mode flags are derived from the resolved target — there is no separate
