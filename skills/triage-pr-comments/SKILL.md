@@ -67,7 +67,7 @@ Combine inline comments, review-level comments, and root-level comments into a s
 
 ### Filter out the PR author's own comments
 
-Determine the PR author from the PR metadata (`headRefName` owner or the `author` field from `gh pr view`). Drop all comments where `user.login` matches the PR author. The author's own comments (dev notes, self-annotations, design rationale) are not review feedback and should never appear in the findings.
+Determine the PR author by reading `author.login` from `gh pr view --json author -q .author.login`. Drop all comments where `user.login` matches that login. The author's own comments (dev notes, self-annotations, design rationale) are not review feedback and should never appear in the findings.
 
 ### Filter out resolved, outdated, and already-replied comments
 
