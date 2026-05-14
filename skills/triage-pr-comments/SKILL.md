@@ -299,6 +299,15 @@ After all fixes are implemented and verified (tests pass, linter clean):
    - For **Fix** verdicts: briefly describe the fix applied.
    - For **Dismiss** verdicts: explain concisely why the concern does not apply (e.g., "no existing rows", "subsumed by the runtime guard", "naming convention is self-documenting").
    - For bot nitpick comments that were filtered out in Step 1: ignore them entirely. Do not reply or acknowledge.
+
+   **Always pipe the reply body through `jq` and use `--input -`. Never pass the body via `gh api -f body='...'`.** Reply bodies regularly contain `{...}` placeholders, `#N` issue references, backticks, and shell metacharacters; `gh -f body='...'` runs the value through the shell and silently strips or expands them, and zsh in particular errors on bare `{...}` and `#`. The safe pattern:
+
+   ```bash
+   jq -n --arg body 'Fixed in d43223c. Updated `gh pr view {number} -R {repo}` so owner/repo#42 resolves correctly.' '{body: $body}' \
+     | gh api -X POST repos/{owner}/{repo}/pulls/{number}/comments/{comment_id}/replies --input -
+   ```
+
+   Same pattern for root-level comments — `... | gh api -X POST repos/{owner}/{repo}/issues/{number}/comments --input -`. After posting, fetch the created comment back and verify the `body` matches what you sent; if it doesn't, delete it (`gh api -X DELETE repos/{owner}/{repo}/pulls/comments/{id}`) and re-post.
 3. **Resolve all inline-comment threads** using the GraphQL `resolveReviewThread` mutation. Pass the thread `id` captured in Step 1 (not the comment `databaseId`):
 
    ```bash
