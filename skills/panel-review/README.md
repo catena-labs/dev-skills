@@ -5,7 +5,7 @@ Fan a code review out to multiple local CLI coding agents (codex, claude, openco
 ## Install
 
 ```
-npx skills add catena-labs/skills --skill panel-review
+npx skills add catena-labs/dev-skills --skill panel-review
 ```
 
 ## How to use it

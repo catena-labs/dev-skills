@@ -1,4 +1,4 @@
-# skills
+# dev-skills
 
 A collection of useful Agent Skills we use at [Catena](https://catenalabs.com).
 
@@ -7,13 +7,13 @@ A collection of useful Agent Skills we use at [Catena](https://catenalabs.com).
 Install every skill in the repo:
 
 ```
-npx skills add catena-labs/skills
+npx skills add catena-labs/dev-skills
 ```
 
 Or install a specific skill:
 
 ```
-npx skills add catena-labs/skills --skill optimize-agents-md
+npx skills add catena-labs/dev-skills --skill optimize-agents-md
 ```
 
 ## Skills
