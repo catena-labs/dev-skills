@@ -1,0 +1,59 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "eslint",
+    "import",
+    "jsdoc",
+    "node",
+    "oxc",
+    "promise",
+    "typescript",
+    "unicorn"
+  ],
+  "categories": {
+    "correctness": "error",
+    "perf": "warn",
+    "suspicious": "warn",
+    "pedantic": "off"
+  },
+  "ignorePatterns": ["**/*.gen.ts"],
+  "rules": {
+    "eslint/curly": "error",
+    "eslint/no-console": "error",
+    "eslint/no-new-func": "error",
+    "eslint/no-script-url": "error",
+    "eslint/no-underscore-dangle": [
+      "warn",
+      {
+        "allow": ["__mockInstance"]
+      }
+    ],
+    "eslint/preserve-caught-error": "error",
+    "import/no-unassigned-import": [
+      "error",
+      {
+        "allow": ["**/*.css"]
+      }
+    ],
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "unicorn/no-array-sort": "error",
+    "unicorn/no-new-buffer": "error",
+    "unicorn/prefer-set-has": "error"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.test.tsx", "tests/**/*.ts"],
+      "rules": {
+        "eslint/no-script-url": "off",
+        "typescript/no-explicit-any": "off"
+      }
+    },
+    {
+      "files": ["*.d.ts"],
+      "rules": {
+        "import/no-unassigned-import": "off"
+      }
+    }
+  ]
+}
