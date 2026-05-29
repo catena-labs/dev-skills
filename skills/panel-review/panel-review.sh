@@ -32,6 +32,9 @@ CHECKOUT_REQUESTED=0            # set to 1 by the deprecated --checkout flag, us
                                 # detect --checkout combined with a target that no
                                 # longer supports a worktree (uncommitted/staged)
 INSTRUCTION_MODE=0             # 1 when target is a PR; panelists fetch via gh themselves
+NO_DELEGATE=0                  # set to 1 by --no-delegate to force the host-matched
+                                # panelist to run as an external CLI subprocess even
+                                # when running inside that host (see "Host delegation").
 
 # ----- Per-panelist model overrides (env) -----
 CODEX_MODEL="${CODEX_MODEL:-}"
@@ -65,7 +68,22 @@ Options:
                           If not given, auto-detects every supported CLI on PATH.
   --out-dir DIR           Where to write captured outputs (default: mktemp).
   --timeout SECS          Per-panelist timeout (default: \$PANEL_REVIEW_TIMEOUT or 600).
+  --no-delegate           Disable host delegation. The panelist matching the host
+                          you're running inside (see below) is then run as an
+                          external CLI subprocess instead of being handed back to
+                          the host coordinator. Use for standalone runs that want
+                          a fully external panel.
   -h, --help              Show this help.
+
+Host delegation:
+  When this script runs INSIDE a host agent (detected via env — currently
+  Claude Code via \$CLAUDECODE), the panelist matching that host (e.g. 'claude')
+  is not spawned as a subprocess. Instead the script composes its prompt, keeps
+  its worktree, writes a delegation record (<out-dir>/<panelist>.delegated), and
+  emits a 'delegated to host coordinator' heartbeat. The host coordinator is
+  expected to run that panelist as a fresh-context native subagent and splice the
+  result into the report — avoiding a redundant nested CLI process while keeping
+  the same conversation isolation. Pass --no-delegate to opt out.
 
 Behavior by target:
   --uncommitted/--staged  Local diff embedded in prompt; panelists run from your
@@ -124,6 +142,7 @@ while [[ $# -gt 0 ]]; do
       shift 2 ;;
     --out-dir)     [[ $# -ge 2 ]] || die "--out-dir needs a path"; OUT_DIR="$2"; shift 2 ;;
     --timeout)     [[ $# -ge 2 ]] || die "--timeout needs seconds"; TIMEOUT_SECS="$2"; shift 2 ;;
+    --no-delegate) NO_DELEGATE=1; shift ;;
     --checkout)
       # Deprecated: PR / --base / --commit reviews now always run worktree-
       # isolated with exec permissions. Accepting the flag as a no-op for those
@@ -225,13 +244,79 @@ if (( INSTRUCTION_MODE )); then
   command -v gh >/dev/null 2>&1 || die "--pr requires the 'gh' CLI on PATH"
 fi
 
+# ----- Detect the host agent we're running inside (for delegation) -----
+#
+# When this script is invoked from inside a host agent's shell, the panelist that
+# matches that host is best run as a native fresh-context subagent of the host
+# rather than as a nested external CLI subprocess: same conversation isolation
+# (the whole point of the panel), no second auth/quota/process, and it works even
+# when the host's CLI isn't installed. The script can't spawn the host's subagent
+# itself — only the host coordinator can — so it instead self-excludes that
+# panelist from subprocess execution and writes a delegation record the
+# coordinator acts on (see the fan-out loop and print_section).
+#
+# Detection is purely env-based so it's identical regardless of which coordinator
+# drives the script. Only the Claude Code row is active; codex / opencode are
+# documented extension points left disabled until their in-subprocess env
+# signatures are verified (shipping a guessed signal risks misfiring and silently
+# dropping a real external panelist).
+DELEGATED_PANELIST=""
+DELEGATE_HOST=""
+detect_host_panelist() {
+  (( NO_DELEGATE )) && return 0
+  # host signal -> "<panelist>:<host-label>"
+  if [[ "${CLAUDECODE:-}" == "1" ]]; then
+    echo "claude:claude-code"; return 0
+  fi
+  # Future hosts: add a row once the env var a host sets inside its own
+  # subprocesses is confirmed, e.g.
+  #   if [[ -n "${CODEX_SESSION_ID:-}" ]];   then echo "codex:codex";       return 0; fi
+  #   if [[ -n "${OPENCODE_SESSION:-}" ]];   then echo "opencode:opencode"; return 0; fi
+  # (placeholder names — verify the real signature before enabling.)
+  return 0
+}
+host_delegate_raw="$(detect_host_panelist)"
+if [[ -n "$host_delegate_raw" ]]; then
+  DELEGATED_PANELIST="${host_delegate_raw%%:*}"
+  DELEGATE_HOST="${host_delegate_raw#*:}"
+fi
+
 # ----- Auto-detect panelists if none specified -----
 if [[ ${#PANELISTS[@]} -eq 0 ]]; then
   for tool in codex claude opencode; do
     command -v "$tool" >/dev/null 2>&1 && PANELISTS+=("$tool")
   done
+  # If we're inside a host whose matching panelist isn't installed as a CLI, we
+  # can still provide it via a host subagent — so don't let auto-detect silently
+  # drop it. Add it to the list; the fan-out loop will route it to delegation
+  # instead of looking for it on PATH.
+  if [[ -n "$DELEGATED_PANELIST" ]]; then
+    already=0
+    if (( ${#PANELISTS[@]} > 0 )); then
+      for x in "${PANELISTS[@]}"; do
+        [[ "$x" == "$DELEGATED_PANELIST" ]] && { already=1; break; }
+      done
+    fi
+    (( already )) || PANELISTS+=("$DELEGATED_PANELIST")
+  fi
 fi
 [[ ${#PANELISTS[@]} -gt 0 ]] || die "no panelists found on PATH (looked for codex, claude, opencode)"
+
+# If the host-matched panelist isn't actually in the (possibly user-specified)
+# panelist list, there's nothing to delegate — clear the delegation so the rest
+# of the script behaves exactly as before.
+if [[ -n "$DELEGATED_PANELIST" ]]; then
+  in_list=0
+  for x in "${PANELISTS[@]}"; do
+    [[ "$x" == "$DELEGATED_PANELIST" ]] && { in_list=1; break; }
+  done
+  if (( in_list )); then
+    echo "panel-review: running inside $DELEGATE_HOST — '$DELEGATED_PANELIST' panelist will be delegated to the host coordinator (run as a native subagent). Pass --no-delegate to force an external subprocess instead." >&2
+  else
+    DELEGATED_PANELIST=""
+    DELEGATE_HOST=""
+  fi
+fi
 
 # ----- Output dir -----
 if [[ -z "$OUT_DIR" ]]; then
@@ -324,6 +409,8 @@ fi
 # most of the bytes are hardlinks. Cleanup loops in the EXIT trap so nothing leaks
 # if the script is killed.
 declare -a WORKTREES=()
+DELEGATED_WORKTREE=""   # set when the delegated panelist needs a worktree the
+                         # coordinator (not this script) is responsible for removing.
 if (( CHECKOUT_MODE )); then
   echo "panel-review: --checkout: materializing one worktree per panelist under $OUT_DIR" >&2
 
@@ -470,10 +557,27 @@ if (( CHECKOUT_MODE )); then
     wt="$OUT_DIR/worktree-$p"
     git worktree add --quiet --detach "$wt" "$WORKTREE_REF" >&2 \
       || die "git worktree add $wt $WORKTREE_REF failed"
-    WORKTREES+=("$wt")
+    # The delegated panelist's worktree is consumed by a host subagent the
+    # coordinator runs OUT-OF-BAND from this script. If it were registered for
+    # the EXIT-trap cleanup, the script could remove it (the instant every
+    # panelist is marked done — immediate for the delegated one) while the
+    # subagent is still reviewing inside it. Hand ownership to the coordinator:
+    # leave it out of WORKTREES and record it so SKILL.md's cleanup step can
+    # `git worktree remove` it after the subagent returns. All other (subprocess)
+    # worktrees are still trap-cleaned by this script.
+    if [[ -n "$DELEGATED_PANELIST" && "$p" == "$DELEGATED_PANELIST" ]]; then
+      DELEGATED_WORKTREE="$wt"
+    else
+      WORKTREES+=("$wt")
+    fi
   done
 
-  echo "panel-review: --checkout: ${#WORKTREES[@]} worktrees ready, panelists will run with WRITE/EXEC permissions in their own isolated checkouts" >&2
+  wt_total=${#WORKTREES[@]}
+  [[ -n "$DELEGATED_WORKTREE" ]] && wt_total=$(( wt_total + 1 ))
+  echo "panel-review: --checkout: ${wt_total} worktrees ready, panelists will run with WRITE/EXEC permissions in their own isolated checkouts" >&2
+  if [[ -n "$DELEGATED_WORKTREE" ]]; then
+    echo "panel-review: --checkout: '$DELEGATED_PANELIST' worktree ($DELEGATED_WORKTREE) is NOT auto-removed — the coordinator must run 'git worktree remove --force $DELEGATED_WORKTREE' after its subagent finishes." >&2
+  fi
 fi
 
 # Diff-size cap only applies when we're embedding the diff in the prompt.
@@ -667,6 +771,32 @@ for p in "${PANELISTS[@]}"; do
   err="$OUT_DIR/$p.err"
   rc="$OUT_DIR/$p.rc"
 
+  # Host-matched panelist: don't spawn a subprocess. Compose-and-hand-back. The
+  # coordinator runs it as a native subagent against $panel_cwd using $PROMPT_FILE
+  # and splices the result into the report. We still wrote its worktree above (in
+  # CHECKOUT_MODE) so the subagent reviews the correctly-pinned target ref. The
+  # sentinel rc "DELEGATED" makes the streaming loop print a placeholder section
+  # and count this panelist done immediately, so the script doesn't block on a
+  # subagent it isn't running. This branch is intentionally before the PATH check:
+  # delegation must work even when the host's own CLI isn't installed.
+  if [[ -n "$DELEGATED_PANELIST" && "$p" == "$DELEGATED_PANELIST" ]]; then
+    panel_cwd="$PWD"
+    (( CHECKOUT_MODE )) && panel_cwd="$OUT_DIR/worktree-$p"
+    : >"$out"
+    printf 'delegated to host coordinator (%s); not run as an external subprocess\n' "$DELEGATE_HOST" >"$err"
+    printf 'DELEGATED\n' >"$rc"
+    {
+      printf 'host=%s\n' "$DELEGATE_HOST"
+      printf 'panelist=%s\n' "$p"
+      printf 'prompt=%s\n' "$PROMPT_FILE"
+      printf 'cwd=%s\n' "$panel_cwd"
+      printf 'instruction_mode=%s\n' "$INSTRUCTION_MODE"
+      printf 'checkout_mode=%s\n' "$CHECKOUT_MODE"
+    } >"$OUT_DIR/$p.delegated"
+    echo "panel-review: $p delegated to host coordinator ($DELEGATE_HOST) — run it as a native subagent (prompt=$PROMPT_FILE, cwd=$panel_cwd)" >&2
+    continue
+  fi
+
   if ! command -v "$p" >/dev/null 2>&1; then
     echo "panel-review: '$p' not on PATH — skipping" >&2
     : >"$out"
@@ -748,6 +878,30 @@ print_section() {
   local p="$1"
   local rc_val
   rc_val="$(cat "$OUT_DIR/$p.rc" 2>/dev/null || echo "?")"
+
+  # Delegated panelist: print a placeholder instead of (absent) subprocess output.
+  # The coordinator replaces this section with its native subagent's result. Not a
+  # failure — do NOT touch ANY_FAIL.
+  if [[ "$rc_val" == "DELEGATED" ]]; then
+    local d_host="$DELEGATE_HOST" d_prompt="$PROMPT_FILE" d_cwd="$PWD"
+    if [[ -f "$OUT_DIR/$p.delegated" ]]; then
+      d_host="$(sed -n 's/^host=//p'   "$OUT_DIR/$p.delegated" | head -n1)"
+      d_prompt="$(sed -n 's/^prompt=//p' "$OUT_DIR/$p.delegated" | head -n1)"
+      d_cwd="$(sed -n 's/^cwd=//p'     "$OUT_DIR/$p.delegated" | head -n1)"
+    fi
+    echo "## ${p} / host-subagent (delegated to ${d_host:-host coordinator})"
+    echo
+    echo "_This panelist was not run as a subprocess. The orchestrating host"
+    echo "(\`${d_host:-?}\`) must run it as a fresh-context native subagent and splice the"
+    echo "result into this section._"
+    echo
+    echo "- Prompt to pass the subagent verbatim: \`${d_prompt}\`"
+    echo "- Directory the subagent must review from: \`${d_cwd}\`"
+    echo
+    echo "panel-review: ${p} delegated to host coordinator (${d_host:-?}) — awaiting native subagent" >&2
+    return
+  fi
+
   local fallback_model=""
   case "$p" in
     codex)    fallback_model="$CODEX_MODEL" ;;
