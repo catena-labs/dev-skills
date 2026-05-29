@@ -1,0 +1,24 @@
+{
+  "name": "dev-skills",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Catena dev skills — reusable Claude Code skills",
+  "license": "UNLICENSED",
+  "author": "Catena Labs",
+  "type": "module",
+  "scripts": {
+    "check": "pnpm run format:check && pnpm run lint",
+    "ci:check": "pnpm run format:check && pnpm run ci:lint",
+    "ci:lint": "pnpm run lint --format=github",
+    "fix": "pnpm run lint:fix && pnpm run format",
+    "format": "oxfmt",
+    "format:check": "pnpm run format --check",
+    "lint": "oxlint --no-error-on-unmatched-pattern",
+    "lint:fix": "pnpm run lint --fix --fix-suggestions"
+  },
+  "devDependencies": {
+    "oxfmt": "0.52.0",
+    "oxlint": "1.67.0"
+  },
+  "packageManager": "pnpm@10.33.2"
+}
