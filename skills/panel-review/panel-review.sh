@@ -411,6 +411,9 @@ fi
 declare -a WORKTREES=()
 DELEGATED_WORKTREE=""   # set when the delegated panelist needs a worktree the
                          # coordinator (not this script) is responsible for removing.
+DELEGATED_HANDOFF_DONE=0 # flipped to 1 once the delegation record + heartbeat are
+                         # emitted. Until then the worktree is still ours to clean
+                         # up on an error exit; after, the coordinator owns it.
 if (( CHECKOUT_MODE )); then
   echo "panel-review: --checkout: materializing one worktree per panelist under $OUT_DIR" >&2
 
@@ -545,11 +548,21 @@ if (( CHECKOUT_MODE )); then
   # `${WORKTREES[@]:-}` would expand to a single empty element on bash 3.2 (the
   # macOS default) and produce a confusing error under `set -u`. Guard the loop
   # with a count check so the trap is a no-op when nothing has been added yet.
+  #
+  # The delegated worktree is deliberately NOT in WORKTREES (the coordinator owns
+  # it post-handoff). But before handoff — e.g. a later panelist's `git worktree
+  # add` fails and die() fires this trap — it would otherwise leak, since no
+  # coordinator will ever pick it up. So also remove it here while
+  # DELEGATED_HANDOFF_DONE is still 0. Both vars are re-expanded at signal time,
+  # so the flag reflects whether handoff actually completed.
   trap '
     if (( ${#WORKTREES[@]} > 0 )); then
       for _wt in "${WORKTREES[@]}"; do
         [[ -n "$_wt" ]] && git worktree remove --force "$_wt" >/dev/null 2>&1 || true
       done
+    fi
+    if [[ -n "$DELEGATED_WORKTREE" ]] && (( ! DELEGATED_HANDOFF_DONE )); then
+      git worktree remove --force "$DELEGATED_WORKTREE" >/dev/null 2>&1 || true
     fi
   ' EXIT
 
@@ -794,6 +807,9 @@ for p in "${PANELISTS[@]}"; do
       printf 'checkout_mode=%s\n' "$CHECKOUT_MODE"
     } >"$OUT_DIR/$p.delegated"
     echo "panel-review: $p delegated to host coordinator ($DELEGATE_HOST) — run it as a native subagent (prompt=$PROMPT_FILE, cwd=$panel_cwd)" >&2
+    # Handoff is complete: the coordinator now owns $panel_cwd's worktree (if any).
+    # Stop the EXIT trap from reclaiming it.
+    DELEGATED_HANDOFF_DONE=1
     continue
   fi
 

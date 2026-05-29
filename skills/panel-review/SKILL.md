@@ -103,8 +103,16 @@ When _not_ to use:
 5. **Run the script** (path: `skills/panel-review/panel-review.sh`). You
    **MUST** launch it as a **background Bash** (`Bash` tool with
    `run_in_background: true`) and poll progress with `BashOutput` on the
-   returned `bash_id` every **10 seconds** until every panelist has emitted its
-   `done (exit N)` heartbeat.
+   returned `bash_id` every **10 seconds** until every panelist has reached its
+   terminal state. A panelist's terminal state is its `done (exit N)` heartbeat
+   — **except a delegated panelist** (see "Host delegation"), whose terminal
+   state is the `delegated … awaiting native subagent` heartbeat _plus_ the
+   completion of the subagent you launch for it. Delegated panelists never emit
+   `done (exit N)`; do not wait for one. The script itself exits once every
+   subprocess panelist is done (the delegated one is marked done immediately), so
+   you'll get the background-Bash completion notification while your delegated
+   subagent may still be running — that's expected; fold its result in when it
+   returns.
 
    This skill explicitly **overrides** the default harness guidance that says
    "do not poll background tasks — you'll be notified when they complete." That
@@ -570,15 +578,27 @@ native subagent (prompt=<path>, cwd=<path>)`), in parallel with continued
    section, embedded diff or `gh`-fetch instructions, focus, etc.) — do not
    rewrite it.
 
-2. **Launch a background subagent** (`Agent` tool, `run_in_background: true`,
-   `subagent_type: general-purpose`) so it runs concurrently with the
-   still-streaming codex/opencode. Compose its prompt as:
+2. **Launch a background subagent** (`Agent` tool, `run_in_background: true`)
+   so it runs concurrently with the still-streaming codex/opencode. Compose its
+   prompt as:
    - a one-line preamble: _"You are an independent code-review panelist with no
      prior context. Treat the directory `<cwd>` as your working root — run every
      shell command and file read against that path (in worktree mode it is a
      checkout pinned to the review's target ref; cd into it first). Produce ONLY
      the review output specified below, starting with a `Model:` line."_
    - then the **verbatim** contents of the prompt file.
+
+   **Match the panelist's permission tier to the target — this is mandatory, not
+   cosmetic.** Read `checkout_mode` from the delegation record:
+   - `checkout_mode=1` (pr/base/commit): `<cwd>` is a throwaway worktree, so
+     write/exec is safe — use a general-purpose subagent that can run tests/grep.
+   - `checkout_mode=0` (`--uncommitted` / `--staged`): `<cwd>` is the user's
+     **real working tree**. The external panelist this replaces ran under
+     `claude -p --permission-mode plan` (a hard read-only sandbox); a
+     general-purpose subagent here would have full write/exec on the user's live
+     files. **Launch it strictly read-only** — use a read-only-capable
+     `subagent_type` (e.g. `Explore`) or otherwise withhold `Edit`/`Write` and
+     any state-changing `Bash`. Do not let a review mutate the working tree.
 
 3. **Output contract.** The subagent must match a CLI panelist's shape exactly:
    first line `Model: <id>` (have it emit `Model: claude-code-subagent` if it
