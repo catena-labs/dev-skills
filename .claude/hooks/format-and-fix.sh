@@ -16,8 +16,9 @@ esac
 bin="$CLAUDE_PROJECT_DIR/node_modules/.bin"
 
 # oxfmt runs even when oxlint exits non-zero so formatting always happens;
-# lint errors propagate via the final exit code.
-"$bin/oxlint" --fix --fix-suggestions --quiet "$file"
+# lint errors propagate via the final exit code. --no-error-on-unmatched-pattern
+# keeps the hook green for non-JS/TS files (md/json/css) that oxlint can't lint.
+"$bin/oxlint" --fix --fix-suggestions --quiet --no-error-on-unmatched-pattern "$file"
 lint=$?
 "$bin/oxfmt" "$file"
 fmt=$?
