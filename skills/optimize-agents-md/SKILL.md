@@ -66,11 +66,14 @@ Use the template in the Output Format section. Apply every rule in the Writing P
 
 ### 6. Wire up CLAUDE.md
 
-Write `CLAUDE.md` with a single line: `@AGENTS.md`
+The goal either way: `AGENTS.md` is the single source of truth, and `CLAUDE.md` resolves to the same content so every tool reads it. `AGENTS.md` is read natively by Claude Code, Codex CLI, Cursor, Copilot, Gemini CLI, and Windsurf; `CLAUDE.md` keeps Claude Code's import behavior.
 
-This gives wider tool support — `AGENTS.md` is read natively by Claude Code, Codex CLI, Cursor, Copilot, Gemini CLI, and Windsurf — while preserving Claude Code's import behavior.
+There are two ways to connect them. Decide which, then confirm with the user:
 
-**Exception:** if the project has genuinely Claude-specific content (compaction behavior, Claude Code hooks), put it below the import:
+- **Symlink** (`ln -s AGENTS.md CLAUDE.md`) — `CLAUDE.md` becomes a pointer to `AGENTS.md`, so the two are literally one file. Zero drift, zero extra budget, nothing to keep in sync. The cost: a symlink can hold _only_ `AGENTS.md`'s content — there's nowhere to put Claude-only additions.
+- **Import** — `CLAUDE.md` is a real file containing `@AGENTS.md`, optionally followed by Claude-specific content. Costs one tiny extra file and the discipline of not letting it accrete, but it's the only option when you genuinely need Claude-only rules.
+
+**Recommendation rule:** if the project has genuinely Claude-specific content that has no better home, use the import form and append that content below `@AGENTS.md`. Otherwise default to the symlink — it's the simplest thing that can't drift.
 
 ```markdown
 @AGENTS.md
@@ -80,7 +83,9 @@ This gives wider tool support — `AGENTS.md` is read natively by Claude Code, C
 - When compacting, preserve the full list of modified files and any test commands.
 ```
 
-Only do this for behaviors other tools don't share **and** that don't have a better home. Many Claude-specific behaviors belong in subagent frontmatter, hooks, or `settings.json` instead — see the next section. Cross-tool rules belong in `AGENTS.md`.
+Present the recommendation to the user with the one-line reason ("no Claude-specific content here, so I'll symlink" / "you have compaction rules, so I'll use the import form"), and let them override. Some teams avoid committed symlinks (Windows checkouts, tools that don't follow them) and prefer the import form regardless — honor that.
+
+Only treat content as Claude-specific when it's a behavior other tools don't share **and** that doesn't have a better home. Many Claude-specific behaviors belong in subagent frontmatter, hooks, or `settings.json` instead — see the next section. Cross-tool rules belong in `AGENTS.md`.
 
 ## Pushing content out of the always-loaded budget
 
@@ -222,7 +227,7 @@ When asked to audit, clean up, or update an existing `CLAUDE.md` or `AGENTS.md`:
 1. **Read the whole file and classify each line** against the "earns its place" and "wastes your budget" criteria above.
 2. **Propose the pruned version to the user before writing.** Show what's being kept, what's being cut, and why. The user may want to rescue something you flagged as filler because of context you don't have.
 3. **Preserve failure-driven rules.** If a line looks odd but specific ("don't add event handlers when the framework handles reactivity"), it probably exists because of a real incident. Keep it unless the user confirms it's obsolete.
-4. **Consolidate, don't duplicate.** If the project has both `CLAUDE.md` and `AGENTS.md`, merge into `AGENTS.md` and replace `CLAUDE.md` with `@AGENTS.md`.
+4. **Consolidate, don't duplicate.** If the project has both `CLAUDE.md` and `AGENTS.md`, merge into `AGENTS.md` and connect `CLAUDE.md` to it per Step 6 — symlink unless the merge surfaced genuinely Claude-only content, in which case use the `@AGENTS.md` import form with that content appended.
 5. **Flag graduation candidates.** Each rule type has a venue that suits it better than always-loaded prose. Note these to the user even though this skill won't implement them:
    - Preferences → stay in `AGENTS.md`.
    - Deterministic behaviors → `.claude/settings.json`.
@@ -246,12 +251,12 @@ Re-read the draft against this checklist before writing the file:
 - [ ] Commands in code fences with exact flags?
 - [ ] File paths avoided in favor of domain concepts where possible?
 - [ ] For monorepos: root contains only cross-cutting rules; package-specific rules live in nested files?
-- [ ] `CLAUDE.md` set to `@AGENTS.md` (plus Claude-specific additions only if genuinely Claude-only)?
+- [ ] `CLAUDE.md` connected to `AGENTS.md` — symlink by default, or the `@AGENTS.md` import form when there's genuinely Claude-only content to append (user confirmed the choice)?
 
 If any check fails, fix it before writing.
 
 # CRITICAL — Read last
 
-- **Wire `CLAUDE.md` to `@AGENTS.md`.** One source of truth, every AI tool reads it. Add Claude-specific rules below the import only when they're genuinely Claude-only and have no better on-demand or deterministic venue.
+- **Point `CLAUDE.md` at `AGENTS.md`.** One source of truth, every AI tool reads it. Symlink by default; use the `@AGENTS.md` import form (with Claude-only rules below it) only when there's genuinely Claude-only content that has no better on-demand or deterministic venue.
 - **Ruthless curation over completeness.** Every line competes for a finite compliance budget. When in doubt, cut.
 - **Every prohibition carries rationale + alternative.** Let the model generalize instead of memorizing.
