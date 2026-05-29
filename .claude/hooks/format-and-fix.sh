@@ -4,6 +4,10 @@
 
 set -uo pipefail
 
+# No-op (rather than hard-fail) when a prerequisite is missing, e.g. jq isn't
+# installed or the repo hasn't run `pnpm install` yet so the tools don't exist.
+command -v jq >/dev/null 2>&1 || exit 0
+
 file=$(jq -r '.tool_input.file_path // empty')
 [ -z "$file" ] && exit 0
 [ -f "$file" ] || exit 0
@@ -14,6 +18,8 @@ case "${file##*.}" in
 esac
 
 bin="$CLAUDE_PROJECT_DIR/node_modules/.bin"
+[ -x "$bin/oxlint" ] || exit 0
+[ -x "$bin/oxfmt" ] || exit 0
 
 # oxfmt runs even when oxlint exits non-zero so formatting always happens;
 # lint errors propagate via the final exit code. --no-error-on-unmatched-pattern
