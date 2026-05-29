@@ -85,9 +85,9 @@ When _not_ to use:
      (`panel-review: scope vs <base>: N commits, M files changed, K insertions(+), L deletions(-)`)
      matches the PR's own commit count before trusting the synthesized findings.
 2. **Pick panelists.** Default: every supported CLI on `PATH` (codex, claude,
-   opencode). The user may name a subset. **Because you are running inside Claude
-   Code, the `claude` panelist is _delegated_ to you — the script hands it back
-   for you to run as a fresh-context native subagent instead of spawning
+   opencode). The user may name a subset. **Because you are running inside
+   Claude Code, the `claude` panelist is _delegated_ to you — the script hands
+   it back for you to run as a fresh-context native subagent instead of spawning
    `claude -p`. See "Host delegation" below.** (This also means `claude` is
    available as a panelist even if the `claude` CLI isn't installed.)
 3. **Capture optional focus.** If the user gave context ("look closely at the
@@ -109,10 +109,10 @@ When _not_ to use:
    state is the `delegated … awaiting native subagent` heartbeat _plus_ the
    completion of the subagent you launch for it. Delegated panelists never emit
    `done (exit N)`; do not wait for one. The script itself exits once every
-   subprocess panelist is done (the delegated one is marked done immediately), so
-   you'll get the background-Bash completion notification while your delegated
-   subagent may still be running — that's expected; fold its result in when it
-   returns.
+   subprocess panelist is done (the delegated one is marked done immediately),
+   so you'll get the background-Bash completion notification while your
+   delegated subagent may still be running — that's expected; fold its result in
+   when it returns.
 
    This skill explicitly **overrides** the default harness guidance that says
    "do not poll background tasks — you'll be notified when they complete." That
@@ -164,12 +164,11 @@ When _not_ to use:
    - Each `BashOutput` poll: scan stderr for `panel-review: <name> started` and
      `panel-review: <name> (<model>) done (exit N)`. Also watch for the
      delegation heartbeat
-     `panel-review: <name> delegated to host coordinator (<host>) — run it as a
-native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
-     the delegated panelist's subagent immediately** per "Host delegation" (it
-     runs in the background, concurrent with the still-streaming panelists), set
-     its todo to `in_progress`, and keep polling the script — do not block on the
-     subagent. On a `started`, set that
+     `panel-review: <name> delegated to host coordinator (<host>) — run it as a native subagent (prompt=<path>, cwd=<path>)`.
+     On that heartbeat, **launch the delegated panelist's subagent immediately**
+     per "Host delegation" (it runs in the background, concurrent with the
+     still-streaming panelists), set its todo to `in_progress`, and keep polling
+     the script — do not block on the subagent. On a `started`, set that
      panelist's todo to `in_progress` (re-call `TodoWrite` with the updated
      list). On a `done`, set it to `completed`, post a single-line user-visible
      status that **includes the model** the panelist self-reported
@@ -215,7 +214,7 @@ native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
    link pointing at the PR file view, so the user can tap straight to the exact
    line on GitHub. Use the helper:
 
-   ```
+   ```bash
    bash skills/panel-review/pr-line-url.sh "$pr_url" "<file>" "<line-or-range>"
    ```
 
@@ -229,17 +228,19 @@ native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
 
    Example transformation. Panelist output:
 
-   ```
-   - [HIGH] auth/session.go:88 — TOCTOU between token check and claim load.
-     Fix: take the cache lock before validating the signature.
+   ```md
+   - [HIGH] auth/session.go:88 — TOCTOU between token check and claim load. Fix:
+     take the cache lock before validating the signature.
    ```
 
    Synthesized entry:
 
-   ```
-   - [HIGH] [auth/session.go:88](https://github.com/owner/repo/pull/27/files#diff-...R88) — TOCTOU between token check and claim load.
-     Fix: take the cache lock before validating the signature.
-     Flagged by 2: codex (gpt-5.5), claude (claude-opus-4.7)
+   ```md
+   - [HIGH]
+     [auth/session.go:88](https://github.com/owner/repo/pull/27/files#diff-...R88)
+     — TOCTOU between token check and claim load. Fix: take the cache lock
+     before validating the signature. Flagged by 2: codex (gpt-5.5), claude
+     (claude-opus-4.7)
    ```
 
    **Every finding MUST include `file:line` (or a named root-cause location for
@@ -298,8 +299,9 @@ native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
    no "all panelists agree" suffix. The absence of a goal-check section below is
    the implicit signal that everyone agreed. Example:
 
-   ```
-   Stand up the @bank/evm package as the foundation for future send-saga work — viem-backed primitives for the EVM transaction lifecycle.
+   ```md
+   Stand up the @bank/evm package as the foundation for future send-saga work —
+   viem-backed primitives for the EVM transaction lifecycle.
    ```
 
    If the goal is contested (any case that would trigger a goal-check section
@@ -369,8 +371,11 @@ native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
    2. Compare your read against the panelist's `Goal:` line.
    3. If they disagree, emit a callout between `### Risk` and the next section:
 
-      ```
-      **Misinterpretation detected:** codex (gpt-5) appears to have misinterpreted the change. It said "<goal>" but the diff actually <what it really does>. Treat its findings below with skepticism — verify each one against the code before acting on it.
+      ```md
+      **Misinterpretation detected:** codex (gpt-5) appears to have
+      misinterpreted the change. It said "<goal>" but the diff actually
+      <what it really does>. Treat its findings below with skepticism — verify
+      each one against the code before acting on it.
       ```
 
    4. Apply step 9's verification more aggressively to that panelist's findings:
@@ -414,8 +419,13 @@ native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
      current change is symptomatic), and you verified them against the code.
      Quote the substantiated claim:
 
-     ```
-     - questionable (raised by: codex (gpt-5.5)): the diff adds client-side validation in `web/src/forms/order.tsx:42`, but the root cause is that the `orders` table allows duplicate `(user_id, idempotency_key)` rows. Real fix lives in a migration on `orders`. This is the third caller to re-implement the same validation — grep shows two prior copies in `web/src/forms/`.
+     ```md
+     - questionable (raised by: codex (gpt-5.5)): the diff adds client-side
+       validation in `web/src/forms/order.tsx:42`, but the root cause is that
+       the `orders` table allows duplicate `(user_id, idempotency_key)` rows.
+       Real fix lives in a migration on `orders`. This is the third caller to
+       re-implement the same validation — grep shows two prior copies in
+       `web/src/forms/`.
      ```
 
      Also promote this finding into `### must-fix` as a HIGH-severity entry (use
@@ -449,35 +459,37 @@ native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
 
    **Per-finding shape (CRITICAL / HIGH / MEDIUM):**
 
-   ```
-   - [SEVERITY] file:line — one-sentence issue.
-     Fix: one-sentence suggested change.
-     Flagged by: codex (gpt-5.5)
+   ```md
+   - [SEVERITY] file:line — one-sentence issue. Fix: one-sentence suggested
+     change. Flagged by: codex (gpt-5.5)
    ```
 
    When 2+ panelists raised the same finding, list every panelist on the
    `Flagged by:` line and prefix with the count. The count is the implicit
    consensus signal — no separate "CONSENSUS" badge, no separate section:
 
-   ```
-   - [MEDIUM] packages/evm/src/receipts.ts:130 + packages/evm/src/errors.ts:364 — `RETRYABLE_RPC_CODES` duplicated verbatim across two files.
-     Fix: export from errors.ts and import in receipts.ts.
-     Flagged by 2: claude (claude-opus-4.7), opencode (qwen3.6-plus)
+   ```md
+   - [MEDIUM] packages/evm/src/receipts.ts:130 + packages/evm/src/errors.ts:364
+     — `RETRYABLE_RPC_CODES` duplicated verbatim across two files. Fix: export
+     from errors.ts and import in receipts.ts. Flagged by 2: claude
+     (claude-opus-4.7), opencode (qwen3.6-plus)
    ```
 
    When panelists assigned different severities to the same finding, use the
    higher and add a short note inline on the `Flagged by:` line:
 
-   ```
-   Flagged by 2: claude (claude-opus-4.7) [LOW], opencode (qwen3.6-plus) [MEDIUM] — using higher.
+   ```md
+   Flagged by 2: claude (claude-opus-4.7) [LOW], opencode (qwen3.6-plus)
+   [MEDIUM] — using higher.
    ```
 
    **Per-finding shape (LOW).** Collapse to a single line. LOW items rarely need
    a sentence of repair guidance; the issue description and `Flagged by:` are
    enough:
 
-   ```
-   - [LOW] packages/evm/src/broadcast.ts:299-307 — `stripSerialized` is unreachable post-`sanitizeMessage`. Flagged by: claude (claude-opus-4.7)
+   ```md
+   - [LOW] packages/evm/src/broadcast.ts:299-307 — `stripSerialized` is
+     unreachable post-`sanitizeMessage`. Flagged by: claude (claude-opus-4.7)
    ```
 
    If a LOW finding genuinely needs a `Fix:` line (e.g. the change is
@@ -488,10 +500,13 @@ native subagent (prompt=<path>, cwd=<path>)`. On that heartbeat, **launch
    `### must-fix` as a HIGH-severity entry. Use the named root-cause location in
    place of `file:line`:
 
-   ```
-   - [HIGH] root cause: `orders` table allows duplicate `(user_id, idempotency_key)` rows — the diff adds client-side validation in `web/src/forms/order.tsx:42` that papers over it; this is the third caller to re-implement the same validation.
-     Fix: add a unique constraint on `orders(user_id, idempotency_key)` (or equivalent migration), then drop the per-caller client validators.
-     Flagged by: codex (gpt-5.5)
+   ```md
+   - [HIGH] root cause: `orders` table allows duplicate
+     `(user_id, idempotency_key)` rows — the diff adds client-side validation in
+     `web/src/forms/order.tsx:42` that papers over it; this is the third caller
+     to re-implement the same validation. Fix: add a unique constraint on
+     `orders(user_id, idempotency_key)` (or equivalent migration), then drop the
+     per-caller client validators. Flagged by: codex (gpt-5.5)
    ```
 
    Put the Approach entry at the top of `### must-fix` — if the approach is
@@ -561,25 +576,24 @@ subagent gives the same thing the panel is built on — a **fresh,
 conversation-isolated reviewer** — with no extra process, and it works even when
 the `claude` CLI isn't installed.
 
-The script can't spawn the host's subagent itself, so it hands that panelist back
-to you (the coordinator): it composes the panelist's prompt, keeps its
+The script can't spawn the host's subagent itself, so it hands that panelist
+back to you (the coordinator): it composes the panelist's prompt, keeps its
 correctly-pinned worktree, writes a delegation record, and emits a `delegated`
 heartbeat. **You run the subagent and splice its result into the report.** The
 fresh context is automatic — a new `Agent` call never inherits this
 conversation's history, which is exactly the isolation `claude -p` provided.
 
 **Fulfillment procedure.** On the delegation heartbeat
-(`panel-review: <name> delegated to host coordinator (<host>) — run it as a
-native subagent (prompt=<path>, cwd=<path>)`), in parallel with continued
-`BashOutput` polling of the script:
+(`panel-review: <name> delegated to host coordinator (<host>) — run it as a native subagent (prompt=<path>, cwd=<path>)`),
+in parallel with continued `BashOutput` polling of the script:
 
-1. **Read the prompt file** at `prompt=<path>` with the `Read` tool. Its contents
-   are the exact review prompt a CLI panelist would have received (Workspace
-   section, embedded diff or `gh`-fetch instructions, focus, etc.) — do not
-   rewrite it.
+1. **Read the prompt file** at `prompt=<path>` with the `Read` tool. Its
+   contents are the exact review prompt a CLI panelist would have received
+   (Workspace section, embedded diff or `gh`-fetch instructions, focus, etc.) —
+   do not rewrite it.
 
-2. **Launch a background subagent** (`Agent` tool, `run_in_background: true`)
-   so it runs concurrently with the still-streaming codex/opencode. Compose its
+2. **Launch a background subagent** (`Agent` tool, `run_in_background: true`) so
+   it runs concurrently with the still-streaming codex/opencode. Compose its
    prompt as:
    - a one-line preamble: _"You are an independent code-review panelist with no
      prior context. Treat the directory `<cwd>` as your working root — run every
@@ -591,7 +605,8 @@ native subagent (prompt=<path>, cwd=<path>)`), in parallel with continued
    **Match the panelist's permission tier to the target — this is mandatory, not
    cosmetic.** Read `checkout_mode` from the delegation record:
    - `checkout_mode=1` (pr/base/commit): `<cwd>` is a throwaway worktree, so
-     write/exec is safe — use a general-purpose subagent that can run tests/grep.
+     write/exec is safe — use a general-purpose subagent that can run
+     tests/grep.
    - `checkout_mode=0` (`--uncommitted` / `--staged`): `<cwd>` is the user's
      **real working tree**. The external panelist this replaces ran under
      `claude -p --permission-mode plan` (a hard read-only sandbox); a
@@ -606,24 +621,25 @@ native subagent (prompt=<path>, cwd=<path>)`), in parallel with continued
    findings (`[SEVERITY] file:line — issue.` / `Fix: …`) the prompt already
    specifies. Identical shape keeps the synthesis logic unchanged.
 
-4. **TodoWrite.** The delegated panelist keeps its `Review: <name>` todo — set it
-   `in_progress` when you launch the subagent, `completed` when it returns.
+4. **TodoWrite.** The delegated panelist keeps its `Review: <name>` todo — set
+   it `in_progress` when you launch the subagent, `completed` when it returns.
 
 5. **Splice the result.** When the subagent returns, use its output as that
    panelist's `## <name>` section in place of the script's delegation
    placeholder, and feed it into synthesis like any other panelist. **Label the
    model** as `<name> (claude-<your-model>, host subagent)` everywhere you cite
    it (e.g. `Flagged by: claude (claude-opus-4.8, host subagent)`). This is
-   mandatory transparency: the delegated panelist is fully conversation-isolated,
-   but it shares the orchestrator's model, so it is not an independent _model_ the
-   way an external codex/opencode panelist is. Weigh consensus accordingly.
+   mandatory transparency: the delegated panelist is fully
+   conversation-isolated, but it shares the orchestrator's model, so it is not
+   an independent _model_ the way an external codex/opencode panelist is. Weigh
+   consensus accordingly.
 
 6. **Clean up the worktree (checkout targets only).** If you also saw
    `'<name>' worktree (<path>) is NOT auto-removed`, run
    `git worktree remove --force <path>` **after** the subagent returns. The
-   script deliberately leaves this one worktree for you — it would otherwise tear
-   it down the instant every panelist is marked done (immediate for the delegated
-   one), out from under your still-running subagent.
+   script deliberately leaves this one worktree for you — it would otherwise
+   tear it down the instant every panelist is marked done (immediate for the
+   delegated one), out from under your still-running subagent.
 
 **Opt-out.** If the user wants a fully external panel — e.g. to get a genuinely
 different model in the claude slot — pass `--no-delegate` to the script; the
