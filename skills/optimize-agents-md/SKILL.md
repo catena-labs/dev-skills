@@ -292,7 +292,7 @@ budget even when irrelevant.
 Heading rules: H1 for the critical anchors and any top-level split; H2 for
 sections; H3 for subsections only when needed; never H4+. Flat beats deep.
 
-Do not strip markdown formatting. Headers and bold serve as parsing landmarks,
+Do not strip Markdown formatting. Headers and bold serve as parsing landmarks,
 especially for smaller models like Haiku.
 
 ## Monorepo handling
