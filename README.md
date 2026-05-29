@@ -6,13 +6,13 @@ A collection of useful Agent Skills we use at [Catena](https://catenalabs.com).
 
 Install every skill in the repo:
 
-```
+```bash
 npx skills add catena-labs/dev-skills
 ```
 
 Or install a specific skill:
 
-```
+```bash
 npx skills add catena-labs/dev-skills --skill optimize-agents-md
 ```
 
