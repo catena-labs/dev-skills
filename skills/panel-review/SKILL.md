@@ -85,7 +85,11 @@ When _not_ to use:
      (`panel-review: scope vs <base>: N commits, M files changed, K insertions(+), L deletions(-)`)
      matches the PR's own commit count before trusting the synthesized findings.
 2. **Pick panelists.** Default: every supported CLI on `PATH` (codex, claude,
-   opencode). The user may name a subset.
+   opencode). The user may name a subset. **Because you are running inside
+   Claude Code, the `claude` panelist is _delegated_ to you — the script hands
+   it back for you to run as a fresh-context native subagent instead of spawning
+   `claude -p`. See "Host delegation" below.** (This also means `claude` is
+   available as a panelist even if the `claude` CLI isn't installed.)
 3. **Capture optional focus.** If the user gave context ("look closely at the
    auth changes"), pass `--focus`.
 4. **Mode is automatic — there is no `--checkout` decision.** PR / `--base` /
@@ -99,8 +103,16 @@ When _not_ to use:
 5. **Run the script** (path: `skills/panel-review/panel-review.sh`). You
    **MUST** launch it as a **background Bash** (`Bash` tool with
    `run_in_background: true`) and poll progress with `BashOutput` on the
-   returned `bash_id` every **10 seconds** until every panelist has emitted its
-   `done (exit N)` heartbeat.
+   returned `bash_id` every **10 seconds** until every panelist has reached its
+   terminal state. A panelist's terminal state is its `done (exit N)` heartbeat
+   — **except a delegated panelist** (see "Host delegation"), whose terminal
+   state is the `delegated … awaiting native subagent` heartbeat _plus_ the
+   completion of the subagent you launch for it. Delegated panelists never emit
+   `done (exit N)`; do not wait for one. The script itself exits once every
+   subprocess panelist is done (the delegated one is marked done immediately),
+   so you'll get the background-Bash completion notification while your
+   delegated subagent may still be running — that's expected; fold its result in
+   when it returns.
 
    This skill explicitly **overrides** the default harness guidance that says
    "do not poll background tasks — you'll be notified when they complete." That
@@ -119,6 +131,13 @@ When _not_ to use:
    `sleep 90 && grep panel-review: tasks/<id>.output | tail` against the
    subagent's transcript file. If you catch yourself reaching for the `Agent`
    tool here, stop and use background `Bash` instead.
+
+   This rule is about the **script**. It does NOT apply to the single delegated
+   `claude` panelist (see "Host delegation"): that panelist produces one final
+   report with no useful intermediate streaming, so running it as a subagent
+   costs nothing — and the slow panelist the rule exists to protect (codex)
+   still runs inside the streaming script. Deep mode's verification subagents
+   are the other sanctioned exception, and only run after panelists finish.
 
    **Do NOT poll by shelling out to `sleep N && grep` against any output file.**
    `BashOutput` is the only correct progress-polling mechanism for this script —
@@ -143,7 +162,13 @@ When _not_ to use:
      harnesses expose this as `TaskCreate` / `TaskUpdate` instead — use
      whichever todo-list tool your environment provides.)
    - Each `BashOutput` poll: scan stderr for `panel-review: <name> started` and
-     `panel-review: <name> (<model>) done (exit N)`. On a `started`, set that
+     `panel-review: <name> (<model>) done (exit N)`. Also watch for the
+     delegation heartbeat
+     `panel-review: <name> delegated to host coordinator (<host>) — run it as a native subagent (prompt=<path>, cwd=<path>)`.
+     On that heartbeat, **launch the delegated panelist's subagent immediately**
+     per "Host delegation" (it runs in the background, concurrent with the
+     still-streaming panelists), set its todo to `in_progress`, and keep polling
+     the script — do not block on the subagent. On a `started`, set that
      panelist's todo to `in_progress` (re-call `TodoWrite` with the updated
      list). On a `done`, set it to `completed`, post a single-line user-visible
      status that **includes the model** the panelist self-reported
@@ -540,6 +565,93 @@ When _not_ to use:
     invent a line number to satisfy the format. The verification step in step 9
     is the _only_ license to rewrite a finding's substance — and only when you
     have actually checked the code.
+
+## Host delegation (running the matching panelist as a native subagent)
+
+When `panel-review.sh` runs inside a host agent it can detect — currently Claude
+Code, via the `$CLAUDECODE` env var — it does **not** spawn that host's panelist
+as an external CLI subprocess. Running `claude -p` from inside a Claude Code
+session spins up a redundant nested process with its own auth/quota; a native
+subagent gives the same thing the panel is built on — a **fresh,
+conversation-isolated reviewer** — with no extra process, and it works even when
+the `claude` CLI isn't installed.
+
+The script can't spawn the host's subagent itself, so it hands that panelist
+back to you (the coordinator): it composes the panelist's prompt, keeps its
+correctly-pinned worktree, writes a delegation record, and emits a `delegated`
+heartbeat. **You run the subagent and splice its result into the report.** The
+fresh context is automatic — a new `Agent` call never inherits this
+conversation's history, which is exactly the isolation `claude -p` provided.
+
+**Fulfillment procedure.** On the delegation heartbeat
+(`panel-review: <name> delegated to host coordinator (<host>) — run it as a native subagent (prompt=<path>, cwd=<path>)`),
+in parallel with continued `BashOutput` polling of the script:
+
+1. **Read the prompt file** at `prompt=<path>` with the `Read` tool. Its
+   contents are the exact review prompt a CLI panelist would have received
+   (Workspace section, embedded diff or `gh`-fetch instructions, focus, etc.) —
+   do not rewrite it.
+
+2. **Launch a background subagent** (`Agent` tool, `run_in_background: true`) so
+   it runs concurrently with the still-streaming codex/opencode. Compose its
+   prompt as:
+   - a one-line preamble: _"You are an independent code-review panelist with no
+     prior context. Treat the directory `<cwd>` as your working root — run every
+     shell command and file read against that path (in worktree mode it is a
+     checkout pinned to the review's target ref; cd into it first). Produce ONLY
+     the review output specified below, starting with a `Model:` line."_
+   - then the **verbatim** contents of the prompt file.
+
+   **Match the panelist's permission tier to the target — this is mandatory, not
+   cosmetic.** Read `checkout_mode` from the delegation record:
+   - `checkout_mode=1` (pr/base/commit): `<cwd>` is a throwaway worktree, so
+     write/exec is safe — use a general-purpose subagent that can run
+     tests/grep.
+   - `checkout_mode=0` (`--uncommitted` / `--staged`): `<cwd>` is the user's
+     **real working tree**. The external panelist this replaces ran under
+     `claude -p --permission-mode plan` (a hard read-only sandbox); a
+     general-purpose subagent here would have full write/exec on the user's live
+     files. **Launch it strictly read-only** — use a read-only-capable
+     `subagent_type` (e.g. `Explore`) or otherwise withhold `Edit`/`Write` and
+     any state-changing `Bash`. Do not let a review mutate the working tree.
+
+3. **Output contract.** The subagent must match a CLI panelist's shape exactly:
+   first line `Model: <id>` (have it emit `Model: claude-code-subagent` if it
+   can't name its exact model), then the `Goal:` / `Approach:` tagged lines and
+   findings (`[SEVERITY] file:line — issue.` / `Fix: …`) the prompt already
+   specifies. Identical shape keeps the synthesis logic unchanged.
+
+4. **TodoWrite.** The delegated panelist keeps its `Review: <name>` todo — set
+   it `in_progress` when you launch the subagent, `completed` when it returns.
+
+5. **Splice the result.** When the subagent returns, use its output as that
+   panelist's `## <name>` section in place of the script's delegation
+   placeholder, and feed it into synthesis like any other panelist. **Label the
+   model** as `<name> (claude-<your-model>, host subagent)` everywhere you cite
+   it (e.g. `Flagged by: claude (claude-opus-4.8, host subagent)`). This is
+   mandatory transparency: the delegated panelist is fully
+   conversation-isolated, but it shares the orchestrator's model, so it is not
+   an independent _model_ the way an external codex/opencode panelist is. Weigh
+   consensus accordingly.
+
+6. **Clean up the worktree (checkout targets only).** If you also saw
+   `'<name>' worktree (<path>) is NOT auto-removed`, run
+   `git worktree remove --force <path>` **after** the subagent returns. The
+   script deliberately leaves this one worktree for you — it would otherwise
+   tear it down the instant every panelist is marked done (immediate for the
+   delegated one), out from under your still-running subagent.
+
+**Opt-out.** If the user wants a fully external panel — e.g. to get a genuinely
+different model in the claude slot — pass `--no-delegate` to the script; the
+panelist then runs as `claude -p` exactly as before.
+
+**Other hosts.** The delegation-marker protocol is host-neutral. A future Codex
+or opencode coordinator that recognizes the same
+`delegated to host coordinator (<host>)` heartbeat can fulfill it with its own
+native subagent; only the script-side env detection (currently just
+`$CLAUDECODE`) and this fulfillment procedure are host-specific. The script's
+host-detection table has documented, disabled rows for codex/opencode awaiting
+verified env signatures.
 
 ## Deep mode
 

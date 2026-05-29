@@ -51,6 +51,14 @@ synthesis.
   locally) and panelists run read-only against your working tree.
 - Spawns each panelist as a fresh, non-interactive subprocess with no shared
   conversation state — the whole point is independent second opinions.
+- **Host delegation:** when run from inside Claude Code (detected via
+  `$CLAUDECODE`), the `claude` panelist is not spawned as a nested `claude -p`
+  process. Instead the script hands it back to the orchestrating session, which
+  runs it as a fresh-context native subagent and splices the result in — same
+  conversation isolation, no second auth/quota/process, and it works even when
+  the `claude` CLI isn't installed. The subagent shares the orchestrator's
+  model, so the report labels it `claude (… host subagent)`. Pass
+  `--no-delegate` for a fully external panel.
 - Streams each panelist's section back as it lands, then groups results into a
   synthesized summary with overview / risk / goal-check / consensus / unique
   findings / disagreements / action list. Every line in the summary points at
@@ -74,3 +82,8 @@ synthesis.
   rather than trimming. PR mode bypasses this cap entirely (no embedded diff).
 - Panelists pick up the project's `AGENTS.md` / `CLAUDE.md` — that's
   intentional, but worth knowing if the file biases their review.
+- **The delegated `claude` panelist is not an independent _model_.** It's
+  conversation-isolated (fresh subagent) but runs on the orchestrator's own
+  model, so it doesn't add model diversity the way an external codex/opencode
+  panelist does. Use `--no-delegate` (or rely on codex/opencode) when you
+  specifically want a different model's opinion in that slot.
