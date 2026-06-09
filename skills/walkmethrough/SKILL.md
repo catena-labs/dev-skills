@@ -137,6 +137,27 @@ actually using, in this order:
   live DB is on a divergent migration line from this branch — surface it, don't
   paper over it.
 
+**3. Gateway live-mode check — know what's real before anything runs.** While
+you have the resolved `.env` open, read the external-gateway mode flags — e.g.
+`BRIDGE_LIVE`, `TURNKEY_LIVE`, and any other `*_LIVE` / `*_ENV=production` /
+sandbox-vs-prod toggles for the payment, signing, KYC, email, or other
+third-party gateways this project talks to (grep the config-loading code for the
+full set rather than guessing). For each gateway the diff touches, classify it:
+
+- **Live** — steps through this gateway create real external state (real
+  customers, real transfers, real signers, real emails). These steps are
+  production-touching: mark them in the plan, prefer read-only or
+  simulator-based verification, and require explicit user confirmation before
+  each one. If a live gateway isn't actually needed to test the diff, propose
+  skipping those steps or flipping the flag to sandbox for the session.
+- **Sandbox / test mode** — safe to exercise freely; say so.
+- **Unset / unconfigured** — if a step needs it, that's a setup step (or the
+  step gets cut); surface it rather than letting the step fail mid-walkthrough.
+
+This classification shapes the whole plan: which steps are safe to run, which
+need a confirmation gate, and which should swap to a simulator. Do it now, not
+when a step is already hitting a real API.
+
 **Ask first before any DB mutation or ambiguous-DB choice — this is
 non-negotiable and users value it.** Resetting, dropping, seeding, repointing,
 or hand-editing the live dev DB destroys real local state. When you hit a fork
@@ -147,9 +168,10 @@ choice. Do not silently pick a DB, reset one, or seed test data to make a step
 pass.
 
 Tell the user, in one line, what you've got watching, including the **verified**
-port: "Dev server up on :<port> (logs streaming to me), DB confirmed on
-:<dbport> (verified your <recent app write> landed there). I'll read both after
-each step." Then move to Phase 1.
+port and the gateway modes: "Dev server up on :<port> (logs streaming to me), DB
+confirmed on :<dbport> (verified your <recent app write> landed there);
+gateways: Bridge sandbox, Turnkey LIVE — I'll gate any Turnkey-touching step on
+your confirmation. I'll read logs and DB after each step." Then move to Phase 1.
 
 Teardown: when the walkthrough ends (or the user stops), kill the background
 dev-server shell you started. Don't leave an orphaned server running.
@@ -211,6 +233,10 @@ For each unit, draft a step with:
   line, and one new `turnkey_sub_org_users` row with `status='active'`", not
   "expect a successful response".
 - **Reset** — how to clean up before the next step (often "nothing — additive").
+- **Gateway exposure** — which external gateways the step exercises and their
+  mode from the Phase 0 check. A step through a LIVE gateway gets a ⚠ marker in
+  the plan, a stated blast radius ("creates a real Bridge customer"), and a
+  confirmation gate before it runs; sandbox steps just note the mode.
 
 Order:
 

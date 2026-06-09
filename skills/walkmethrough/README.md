@@ -27,6 +27,12 @@ Just ask Claude Code in plain English:
   server in a background shell and opens a direct connection to the local
   database — verifying it's the _same_ DB the running app writes to, not a stale
   instance on another port — before any test step runs.
+- **Checks which external gateways are live before planning.** It reads the
+  resolved `.env` for gateway mode flags (e.g. `BRIDGE_LIVE`, `TURNKEY_LIVE`,
+  and the project's other sandbox-vs-prod toggles) and classifies each gateway
+  the diff touches. Live-gateway steps get a ⚠ marker, a stated blast radius,
+  and a confirmation gate; sandbox steps run freely; unconfigured gateways
+  become setup steps instead of mid-walkthrough failures.
 - **Discovers the real change set.** Committed work on the branch plus
   uncommitted, staged, and untracked files, with derivative noise (lockfiles,
   codegen, formatter churn) filtered out.
