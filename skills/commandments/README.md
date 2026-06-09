@@ -26,8 +26,9 @@ Just ask Claude Code in plain English — defaults to the current local work
 
 ## What it does
 
-- **Loads the rules from `COMMANDMENTS.md` at the repo root.** No commandments
-  file, no review — it tells you and stops rather than inventing rules.
+- **Loads the rules from `COMMANDMENTS.md` at the repo root, or
+  `docs/COMMANDMENTS.md`.** No commandments file, no review — it tells you and
+  stops rather than inventing rules.
 - **Scopes to what changed.** Default is the union of uncommitted work and
   committed-but-unmerged branch work versus the merge base; pass a PR reference
   to review that PR instead, or `--full` to read whole files rather than just

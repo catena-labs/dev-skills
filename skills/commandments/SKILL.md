@@ -27,14 +27,15 @@ oxfmt / knip already enforce, and it never proposes formatting churn.
 Find the rules, in this order:
 
 1. `COMMANDMENTS.md` at the repo root (project-specific; preferred).
-2. `~/.agents/docs/commandments.md` (the shared fallback copy).
+2. `docs/COMMANDMENTS.md` (project-specific, docs-folder convention).
+3. `~/.agents/docs/commandments.md` (the shared fallback copy, if present).
 
 Read the whole file. The review covers the numbered commandments. **Skip the
 "Beyond style" section** (those are architectural requirements enforced
 elsewhere, not readability conventions) and skip anything the intro lists as
 linter-enforced.
 
-If neither file exists, stop and tell the user there are no commandments to
+If none of these exist, stop and tell the user there are no commandments to
 check against.
 
 ## Step 2: Determine scope
