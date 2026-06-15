@@ -10,7 +10,9 @@ description:
   on each sensitive hunk (auth, money movement, schema, secrets), posts an
   approve/do-not-approve summary, and swaps its 👀 reaction to 🚀 on an approve
   verdict (leaving 👀 when it left comments). Tracks engagement (NEW / UPDATED /
-  SEEN) so it doesn't repeat work. Read-only toward the code: it never edits,
+  SEEN) and posts each comment at most once (never re-posting one already on the
+  PR or one a human resolved; the summary is upserted), so it doesn't repeat work.
+  Read-only toward the code: it never edits,
   commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
 allowed-tools:
   Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
@@ -294,9 +296,53 @@ one off-diff line 422s the whole thing. Post each comment as its own standalone
 inline review comment; a 422 on one falls back to the summary without losing the
 others.
 
+**Idempotency — post every comment at most once; never re-post one already on
+the PR or one a human resolved.** This skill re-runs on every UPDATED push, so
+without a guard it re-posts the same findings and `[HUMAN REVIEW]` anchors each
+tick — its cardinal sin. Before posting anything, fetch what is already on the
+PR. Inline comments live in review threads, and **only GraphQL exposes a
+thread's resolution state** (REST `pulls/{number}/comments` cannot tell you a
+human closed one):
+
+```bash
+# Every inline thread already on the PR: resolution state, path, and body head.
+gh api graphql -f owner={owner} -f repo={repo} -F num={number} -f query='
+query($owner:String!,$repo:String!,$num:Int!){
+  repository(owner:$owner,name:$repo){ pullRequest(number:$num){
+    reviewThreads(first:100){ nodes{
+      isResolved
+      comments(first:1){ nodes{ path body } }
+    } } } } }' \
+  -q '.data.repository.pullRequest.reviewThreads.nodes[]
+      | "\(if .isResolved then "resolved" else "open" end)\t\(.comments.nodes[0].path)\t\(.comments.nodes[0].body | gsub("\n";" ") | .[0:100])"'
+```
+
+Each line is a comment already on the PR — `resolved`/`open`, its `path`, and
+the start of its body. A planned comment is **already covered** when an existing
+thread targets the same code and makes the same point:
+
+- **FIX finding** → same `path` and the same one-line issue (the bold `[SEV]`
+  headline). Match on the **issue, not the line number** — lines drift across
+  commits, the point does not.
+- **`[HUMAN REVIEW]` anchor** → same `path` and the same surface (the
+  `[HUMAN REVIEW] <surface>` label).
+
+Skip any planned comment that is already covered:
+
+- **resolved** → a human dispositioned it (fixed it, or judged it not worth
+  fixing) and closed the thread; re-posting reopens a decision they made. Never
+  re-post.
+- **open** → it is already on the PR (a prior tick of this bot, or anyone,
+  including a pre-existing human comment); a duplicate is pure noise.
+
+Only post the comments **not** already covered. (The summary below is
+**upserted**, so it too is idempotent — see there.) This gate governs both
+comment kinds below.
+
 **FIX findings** — one POST each, with a ` ```suggestion ` block for concrete
 line-level replacements (one-click commit) or prose for structural fixes. Lead
-with the `[SEVERITY]` tag.
+with the `[SEVERITY]` tag. **Apply the gate above:** skip a finding already on
+the PR (same `path` + issue) or one a human resolved; post only the new ones.
 
 ```bash
 HEAD=$(gh pr view {number} -R {owner}/{repo} --json headRefOid -q .headRefOid)
@@ -322,45 +368,13 @@ and **no suggestion block** (it's "a human should scrutinize this", not a fix).
 Name the surface and what to check, so the human-review signal lands _on the
 exact code_ a person should read, not only in the summary.
 
-**Idempotency — never re-post a `[HUMAN REVIEW]` anchor that already exists.** A
-`[HUMAN REVIEW]` note is a standing "a person should scrutinize this surface"
-marker, **not** a per-tick finding, so it must be posted **at most once per
-(file, surface) for the life of the PR**. On an UPDATED re-review the same
-sensitive surface is usually still touched, and re-anchoring an identical note
-every tick is exactly the nagging this skill must avoid. So before posting,
-enumerate the `[HUMAN REVIEW]` anchors already on the PR — inline comments live
-in review threads, and only GraphQL exposes a thread's resolution state, so REST
-(`pulls/{number}/comments`) cannot tell you whether a human already closed one:
-
-```bash
-gh api graphql -f owner={owner} -f repo={repo} -F num={number} -f query='
-query($owner:String!,$repo:String!,$num:Int!){
-  repository(owner:$owner,name:$repo){ pullRequest(number:$num){
-    reviewThreads(first:100){ nodes{
-      isResolved
-      comments(first:1){ nodes{ path body } }
-    } } } } }' \
-  -q '.data.repository.pullRequest.reviewThreads.nodes[]
-      | select(.comments.nodes[0].body | test("\\[HUMAN REVIEW\\]"))
-      | "\(if .isResolved then "resolved" else "open" end)\t\(.comments.nodes[0].path)\t\(.comments.nodes[0].body | gsub("\n";" ") | .[0:80])"'
-```
-
-Each line is an anchor already on the PR — its `resolved`/`open` state, its
-`path`, and the start of its body (which names the surface, e.g.
-`**[HUMAN REVIEW] Authentication.**`). **Drop any planned anchor whose (path,
-surface) already appears here:**
-
-- **resolved** → a human has already looked at and dispositioned this surface;
-  re-posting reopens a thread they deliberately closed. Never re-anchor it.
-- **open** → the surface is already flagged (by a prior tick of this bot, or by
-  anyone, including a pre-existing human note); a second identical anchor is pure
-  noise.
-
-Match by **surface, not exact line**, so a re-anchor is still suppressed when new
-commits shift the line number — a stale unresolved anchor shows up as `open`,
-which is precisely the duplicate to skip. The surface is still named in the
-summary callout every tick, so suppressing the inline duplicate loses no signal.
-Only post inline anchors for surfaces **not** already covered:
+Apply the idempotency gate above, keyed by `path` + surface: **skip any surface
+already covered** — `resolved` (a human dispositioned it; never reopen) or
+`open` (already flagged, by this bot or a pre-existing human note). A
+`[HUMAN REVIEW]` note is a standing once-per-(file, surface) marker, posted at
+most once for the life of the PR; the surface still appears in the summary
+callout every tick, so suppressing the inline duplicate loses no signal. Post
+anchors only for surfaces **not** already covered:
 
 ```bash
 # One per sensitive anchor. Same independent-POST + 422-fallback contract as FIX.
@@ -379,17 +393,32 @@ the diff. If a human-review anchor coincides with a FIX line, keep them as
 distinct comments (different tags, different intent). An anchor that 422s
 (somehow off-diff) is fine: the surface is still named in the summary callout.
 
-Then post the summary + verdict as one issue comment (also where the dedup
+Then write the summary + verdict as one issue comment (also where the dedup
 marker lives). This body and the inline comments go to GitHub, so keep them
 em-dash-free (colons, commas, parens) per the repo's user-facing-prose
 convention.
 
+**Upsert it — one summary per PR, always current.** If this bot already left a
+summary (any comment carrying the `<!-- bot-panel-review-loop: head= -->`
+marker), edit that comment in place; only create a new one when none exists. So
+an UPDATED re-review refreshes the single summary (new verdict, new head marker)
+instead of stacking a fresh comment each tick.
+
 ```bash
-gh api repos/{owner}/{repo}/issues/{number}/comments --method POST \
-  --input /tmp/bot-panel-review-loop-{number}-summary.json
+# Upsert: PATCH our latest marker-carrying comment if present, else POST a new one.
+PRIOR=$(gh api repos/{owner}/{repo}/issues/{number}/comments --paginate \
+  -q '[.[] | select(.body | test("<!-- bot-panel-review-loop: head=")) | .id] | last // empty')
+if [ -n "$PRIOR" ]; then
+  gh api repos/{owner}/{repo}/issues/comments/$PRIOR --method PATCH \
+    --input /tmp/bot-panel-review-loop-{number}-summary.json
+else
+  gh api repos/{owner}/{repo}/issues/{number}/comments --method POST \
+    --input /tmp/bot-panel-review-loop-{number}-summary.json
+fi
 ```
 
-Summary body (always posted, even with zero inline findings):
+Summary body (always written — posted or upserted — even with zero inline
+findings):
 
 ```
 ## Panel review (advisory)
@@ -533,7 +562,7 @@ fixed-interval cron vs `/loop`'s dynamic self-pacing.
 | Citing a pre-image / worktree-prefixed line                                                   | `line` is the post-image (RIGHT) number; `path` is repo-root-relative — confirm against `gh pr diff -- path` (4b)                                                                                                                               |
 | Suggestion block replacing the wrong span                                                     | Multi-line fixes need the `start_line`..`line` range, not a single `line`                                                                                                                                                                       |
 | Human-review only in the summary                                                              | Anchor a `[HUMAN REVIEW]` inline comment on each sensitive hunk too (4c) — the human-review note belongs on the code                                                                                                                            |
-| Re-posting a `[HUMAN REVIEW]` anchor every UPDATED tick                                       | A standing once-per-(file,surface) marker, not a per-tick finding — query `reviewThreads` via GraphQL first and skip surfaces already flagged open or resolved (4c)                                                                             |
+| Re-posting a comment already on the PR (or one a human resolved)                              | Every comment is post-once — query `reviewThreads` (GraphQL exposes resolution state) before posting and skip FIX/HUMAN-REVIEW duplicates; upsert the summary (4c)                                                                              |
 | Holding a prior do-not-approve for a disclosure/title finding the author fixed in the PR body | A description edit is not a commit, so it never shows in the compare diff — re-read `gh pr view --json title,body,labels` on an UPDATED re-review; a metadata/process finding resolves the moment the body discloses it (4a, incremental scope) |
 | Inferring a disclosure gap from a `docs:`-style title alone                                   | Judge disclosure against the actual PR body you fetched, not the title — the body may already call the sensitive change out (4a)                                                                                                                |
 | Skipping the human-review callout on a clean auth/money PR                                    | An Approve on a sensitive surface still wants a human; emit callout + anchors (4c)                                                                                                                                                              |
