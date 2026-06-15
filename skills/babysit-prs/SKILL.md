@@ -37,7 +37,10 @@ emits one compact JSON digest:
     "unresolvedThreads": 0,         // non-author, unresolved, not-outdated (total)
     "newThreads": 0,                // of those, NOT yet acked in the seen-ledger
     "standingGates": 0,             // of those, already acked (silenced, unchanged)
-    "threads": [{ "sig", "path", "line", "lastAuthor", "at" }],  // the unseen ones only
+    "threads": [{ "sig", "path", "line", "lastAuthor", "at" }],  // the unseen inline ones only
+    "newRootComments": 0,           // unseen non-author, non-bot root (issue) comments
+    "standingRootGates": 0,         // of those, already acked
+    "rootComments": [{ "sig", "author", "at" }],  // the unseen root comments only
     "failingLogs": [{ "check", "jobId", "excerpt" }],  // ~40-line error signature only
     "bucket": "CONFLICTING | CI_FAIL | HAS_COMMENTS | BEHIND | CI_PENDING | GREEN_IDLE"
   }]
@@ -56,9 +59,17 @@ not on total `unresolvedThreads`, so a comment you have already triaged and
 acked never re-surfaces — that is the whole point of the split. `threads`
 carries only the **unseen** ones (no bodies; fetch those yourself for just
 these). Each thread's `sig` is `"c"+<last-comment id>`, so a later reviewer
-reply mints a new sig and the thread re-surfaces on its own. `standingGates` is
-a cheap count of already-acked threads still open on the PR: mention it in the
-report as a one-liner (`#957: 3 known gates, unchanged`) but it is **not**
+reply mints a new sig and the thread re-surfaces on its own. The scanner reads
+**two** comment channels: inline review `threads` and root-level PR conversation
+comments (`rootComments`) — the latter is where a reviewer drops a finding on a
+line outside the diff, which the inline-thread query never sees. `rootComments`
+behaves exactly like `threads` (sig `"r"+<comment id>`, unseen-only, no bodies),
+drives `HAS_COMMENTS` via `newRootComments`, and counts acked ones in
+`standingRootGates`. Author comments, `[bot]` accounts, and (by default)
+catena's review bot `catenabot` are filtered out; adjust the extra-login filter
+via `BABYSIT_PRS_IGNORE_LOGINS=foo,bar` (set it empty to clear). `standingGates`
+is a cheap count of already-acked threads still open on the PR: mention it in
+the report as a one-liner (`#957: 3 known gates, unchanged`) but it is **not**
 actionable and does not make the PR busy. You ack threads with `mark-seen.sh`
 (see check 3); it is the ledger's only writer.
 
@@ -66,7 +77,7 @@ actionable and does not make the PR busy. You ack threads with `mark-seen.sh`
 | -------------- | --------------------------------------------------- |
 | `CONFLICTING`  | Per-PR check 1 (freshness / conflict resolution)    |
 | `CI_FAIL`      | Per-PR check 2 (read `failingLogs[].excerpt` first) |
-| `HAS_COMMENTS` | Per-PR check 3 (triage-pr-comments)                 |
+| `HAS_COMMENTS` | Per-PR check 3 (triage `threads` + `rootComments`)  |
 | `BEHIND`       | Per-PR check 1 (up-to-date gate)                    |
 | `CI_PENDING`   | nothing — checks still running, recheck next tick   |
 | `GREEN_IDLE`   | nothing                                             |
@@ -91,12 +102,15 @@ actionable and does not make the PR busy. You ack threads with `mark-seen.sh`
    appended commits. Non-mechanical failures (logic, flaky infra, anything
    touching auth/money/schema): report and ask. Classifying mechanical-vs-not is
    your call, not the scanner's.
-3. **Comments.** Work only the `threads` array (the **unseen** ones); fetch
-   bodies for just those. **REQUIRED SUB-SKILL:** triage-pr-comments. Apply its
-   simple Fix verdicts; for complicated ones (redesigns, scope changes, judgment
-   calls) stop and ask the user via AskUserQuestion with a concrete
-   recommendation. Never post a reply to a human reviewer without showing the
-   user a draft first; bot replies don't need the gate.
+3. **Comments.** Work the **unseen** items from both channels: the `threads`
+   array (inline review) and the `rootComments` array (root-level PR
+   conversation). Fetch bodies for just those — inline from the thread, root via
+   `gh api repos/<owner>/<name>/issues/comments/<id>` (the id is the `sig` minus
+   its `r` prefix). **REQUIRED SUB-SKILL:** triage-pr-comments. Apply its simple
+   Fix verdicts; for complicated ones (redesigns, scope changes, judgment calls)
+   stop and ask the user via AskUserQuestion with a concrete recommendation.
+   Never post a reply to a human reviewer without showing the user a draft
+   first; bot replies don't need the gate.
 
    Then **ack** every thread that needs no further agent action so it stops
    re-surfacing — pass its `sig` from the digest, never hand-computed:

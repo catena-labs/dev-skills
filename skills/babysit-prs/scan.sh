@@ -21,17 +21,26 @@
 #        "newThreads": int,            // of those, NOT yet in the seen-ledger
 #        "standingGates": int,         // of those, already acked (silenced, unchanged)
 #        "threads": [ {sig, path, line, lastAuthor, at} ],  // the unseen ones only
+#        "newRootComments": int,       // unseen non-author, non-bot root (issue) comments
+#        "standingRootGates": int,     // of those, already acked
+#        "rootComments": [ {sig, author, at} ],  // the unseen root comments only
 #        "failingLogs": [ {runId, excerpt} ],  // error signature only, capped
 #        "bucket": "CONFLICTING|CI_FAIL|HAS_COMMENTS|BEHIND|CI_PENDING|GREEN_IDLE"
 #     } ]
 #   }
 #
-# Seen-ledger: a thread's `sig` is "c"+<last-comment id>, so a reviewer reply
-# mints a fresh sig and re-surfaces the thread. mark-seen.sh (the only writer)
-# records sigs the agent triaged to a no-further-action verdict; this scanner
-# only READS the ledger to split newThreads from standingGates. HAS_COMMENTS
-# fires on newThreads, so once every thread is acked the PR goes quiet until one
-# changes. Ledger lives at
+# Two comment channels are scanned: inline review threads (`threads`) and
+# root-level PR conversation comments (`rootComments`) — the latter is where a
+# reviewer drops a finding on a line outside the diff, which the inline-thread
+# query never sees. Both feed HAS_COMMENTS.
+#
+# Seen-ledger: an inline thread's `sig` is "c"+<last-comment id> and a root
+# comment's `sig` is "r"+<comment id>, so a reviewer reply (new id) mints a fresh
+# sig and re-surfaces the item. mark-seen.sh (the only writer) records sigs the
+# agent triaged to a no-further-action verdict; this scanner only READS the
+# ledger to split new items from standing (acked) ones. HAS_COMMENTS fires on
+# newThreads or newRootComments, so once every item is acked the PR goes quiet
+# until one changes. Ledger lives at
 # ${XDG_STATE_HOME:-$HOME/.local/state}/babysit-prs/<owner>-<name>.json.
 #
 # Usage:
@@ -53,6 +62,11 @@ set -uo pipefail
 REPO=""
 AUTHOR="@me"
 INCLUDE_LOGS=1
+# Comma-separated logins to drop from root-level comments on top of the [bot]
+# accounts already filtered. Defaults to catena's review bot (catenabot), which
+# posts advisory panel reviews from a regular User account. Override, or clear
+# with an empty value, via BABYSIT_PRS_IGNORE_LOGINS=foo,bar.
+IGNORE_LOGINS="${BABYSIT_PRS_IGNORE_LOGINS-catenabot}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -177,6 +191,33 @@ while IFS= read -r row; do
   standing="$(printf '%s' "$threads_full" | jq '[.[] | select(.seen == true)] | length')"
   newthreads="$(printf '%s' "$threads_full" | jq '[.[] | select(.seen == false) | del(.seen)]')"
 
+  # Root-level (issue) comments on the PR conversation — reviewer feedback posted
+  # to the thread rather than inline (e.g. a finding on a line outside the diff).
+  # The reviewThreads query above never sees these, so without this channel a
+  # human comment here is silently missed. Drop the author's own comments, [bot]
+  # accounts, and any login in IGNORE_LOGINS; tag the rest with a seen-ledger sig
+  # ("r"+comment id) and split new vs already-acked, mirroring threads. Bodies are
+  # omitted on purpose — the agent fetches them for just the unseen ids.
+  root_raw="$(gh api --paginate "repos/$REPO/issues/$num/comments" 2>/dev/null \
+    | jq -s '[.[][]?]')" || root_raw="[]"
+  [[ -z "$root_raw" ]] && root_raw="[]"
+  root_full="$(printf '%s' "$root_raw" | jq \
+    --arg me "$ME" --argjson ledger "$ledger" --arg ignore "$IGNORE_LOGINS" '
+    ($ignore | split(",") | map(select(. != ""))) as $ignored
+    | [ .[]
+        | (.user.login // "") as $login
+        | select($login != $me
+                 and ((.user.type // "") != "Bot")
+                 and (($ignored | index($login)) | not))
+        | ("r" + (.id | tostring)) as $sig
+        | { sig: $sig, author: $login, at: .created_at,
+            seen: ($ledger | has($sig)) }
+      ]')"
+  [[ -z "$root_full" ]] && root_full="[]"
+  rootnewcount="$(printf '%s' "$root_full" | jq '[.[] | select(.seen == false)] | length')"
+  rootstanding="$(printf '%s' "$root_full" | jq '[.[] | select(.seen == true)] | length')"
+  rootnew="$(printf '%s' "$root_full" | jq '[.[] | select(.seen == false) | del(.seen)]')"
+
   # Error signatures for failing checks, deduped by job and capped at 3 jobs.
   logs="[]"
   if [[ "$INCLUDE_LOGS" == "1" ]]; then
@@ -206,7 +247,7 @@ while IFS= read -r row; do
     bucket="CONFLICTING"
   elif [[ "$failed" -gt 0 ]]; then
     bucket="CI_FAIL"
-  elif [[ "$newcount" -gt 0 ]]; then
+  elif [[ "$newcount" -gt 0 || "$rootnewcount" -gt 0 ]]; then
     bucket="HAS_COMMENTS"
   elif [[ "$mergestate" == "BEHIND" ]]; then
     bucket="BEHIND"
@@ -228,12 +269,17 @@ while IFS= read -r row; do
     --argjson newThreads "$newcount" \
     --argjson standingGates "$standing" \
     --argjson threads "$newthreads" \
+    --argjson newRootComments "$rootnewcount" \
+    --argjson standingRootGates "$rootstanding" \
+    --argjson rootComments "$rootnew" \
     --argjson failingLogs "$logs" \
     --arg bucket "$bucket" \
     '{number:$number, title:$title, branch:$branch,
       mergeable:$mergeable, mergeState:$mergeState, reviewDecision:$reviewDecision,
       ci:$ci, unresolvedThreads:$unresolvedThreads, newThreads:$newThreads,
-      standingGates:$standingGates, threads:$threads, failingLogs:$failingLogs,
+      standingGates:$standingGates, threads:$threads,
+      newRootComments:$newRootComments, standingRootGates:$standingRootGates,
+      rootComments:$rootComments, failingLogs:$failingLogs,
       bucket:$bucket}')")
 done < <(printf '%s' "$prs" | jq -c '.[]')
 
