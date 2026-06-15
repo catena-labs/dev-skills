@@ -20,6 +20,7 @@ npx skills add catena-labs/dev-skills --skill optimize-agents-md
 
 | Skill                                                   | Description                                                                                                                                         |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [babysit-prs](./skills/babysit-prs)                     | Sweep all your open non-draft PRs on a `/loop` — keep them mergeable, CI green, and review comments triaged, acting only on the PRs that need it    |
 | [bot-panel-review-loop](./skills/bot-panel-review-loop) | Sweep a repo's open PRs — one fresh agent per PR runs a gather-only panel review and posts advisory findings to GitHub. Read-only; built for /loop  |
 | [commandments](./skills/commandments)                   | Audit a branch, PR, or uncommitted changes against your project's COMMANDMENTS.md — worked checklist with file:line findings and concrete fixes     |
 | [optimize-agents-md](./skills/optimize-agents-md)       | Optimize your AGENTS.md (and CLAUDE.md) files according to best practices. Works with monorepos, too                                                |
