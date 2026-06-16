@@ -20,7 +20,7 @@
 #        "unresolvedThreads": int,     // non-author, unresolved, not-outdated (total)
 #        "newThreads": int,            // of those, NOT yet in the seen-ledger
 #        "standingGates": int,         // of those, already acked (silenced, unchanged)
-#        "threads": [ {sig, path, line, lastAuthor, at} ],  // the unseen ones only
+#        "threads": [ {sig, threadId, path, line, lastAuthor, at} ],  // the unseen ones only
 #        "newRootComments": int,       // unseen non-author, non-bot root (issue) comments
 #        "standingRootGates": int,     // of those, already acked
 #        "rootComments": [ {sig, author, at} ],  // the unseen root comments only
@@ -158,6 +158,7 @@ while IFS= read -r row; do
             reviewThreads(first: 100, after: $endCursor) {
               pageInfo { hasNextPage endCursor }
               nodes {
+                id
                 isResolved
                 isOutdated
                 path
@@ -182,7 +183,7 @@ while IFS= read -r row; do
       | (.comments.nodes | last) as $last
       | select($last != null and $last.databaseId != null and $last.author.login != $me)
       | ("c" + ($last.databaseId | tostring)) as $sig
-      | { sig: $sig, path: .path, line: .line,
+      | { sig: $sig, threadId: .id, path: .path, line: .line,
           lastAuthor: $last.author.login, at: $last.createdAt,
           seen: ($ledger | has($sig)) }
     ]')"
