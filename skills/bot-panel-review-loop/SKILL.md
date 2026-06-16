@@ -6,10 +6,10 @@ description:
   not-yet-approved PR that is either non-draft or a draft labeled "ready for
   review", dispatch a fresh per-PR agent that reacts 👀, runs a
   gather-only panel-review-loop, posts inline PR comments at the correct
-  file+line suggesting fixes, anchors an inline "human review recommended" note
-  on each sensitive hunk (auth, money movement, schema, secrets), posts an
-  approve/do-not-approve summary, and swaps its 👀 reaction to 🚀 on an approve
-  verdict (leaving 👀 when it left comments). Tracks engagement (NEW / UPDATED /
+  file+line suggesting fixes, posts a concise approve/do-not-approve summary
+  (findings and a human-review note for sensitive surfaces — auth, money
+  movement, schema, secrets — folded into collapsible sections), and swaps its
+  👀 reaction to 🚀 on an approve verdict (leaving 👀 when it left comments). Tracks engagement (NEW / UPDATED /
   SEEN) and posts each comment at most once (never re-posting one already on the
   PR or one a human resolved; the summary is upserted), so it doesn't repeat work.
   Read-only toward the code: it never edits,
@@ -250,15 +250,16 @@ title alone (the body may already call the change out).
 the catalog in 4c, record which surfaces (auth/authz, money movement,
 schema/migration, secrets/external integrations) the PR touches — computed
 independently of whether the panel found anything. For each touched surface also
-note the **representative anchor(s)**: the `file` + post-image `line` of the
-changed sensitive code (the new auth gate, the money-math line, the new
-migration column, the credential read). These anchors drive the inline
-`[HUMAN REVIEW]` comments in 4c and the human-review flag returned to the sweep.
+note the `file:line` of the changed sensitive code (the new auth gate, the
+money-math line, the new migration column, the credential read), so the
+human-review note can point a reader at it. These surfaces populate the
+collapsed human-review section in the summary (4c) and the human-review flag
+returned to the sweep — they are no longer posted as inline comments.
 
 ### 4b. Resolve the correct file + line for each finding
 
 An inline comment only lands on the right code when its anchor matches the PR
-diff exactly. Per finding (and per human-review anchor), get all four right:
+diff exactly. Per finding, get all four right:
 
 - **`path`** — repo-root-relative, exactly as in the diff (e.g.
   `apps/api/src/services/transfers.ts`). Panelists run inside a worktree, so
@@ -298,11 +299,10 @@ others.
 
 **Idempotency — post every comment at most once; never re-post one already on
 the PR or one a human resolved.** This skill re-runs on every UPDATED push, so
-without a guard it re-posts the same findings and `[HUMAN REVIEW]` anchors each
-tick — its cardinal sin. Before posting anything, fetch what is already on the
-PR. Inline comments live in review threads, and **only GraphQL exposes a
-thread's resolution state** (REST `pulls/{number}/comments` cannot tell you a
-human closed one):
+without a guard it re-posts the same findings each tick — its cardinal sin.
+Before posting anything, fetch what is already on the PR. Inline comments live
+in review threads, and **only GraphQL exposes a thread's resolution state**
+(REST `pulls/{number}/comments` cannot tell you a human closed one):
 
 ```bash
 # Every inline thread already on the PR: resolution state, path, and body head.
@@ -324,8 +324,6 @@ thread targets the same code and makes the same point:
 - **FIX finding** → same `path` and the same one-line issue (the bold `[SEV]`
   headline). Match on the **issue, not the line number** — lines drift across
   commits, the point does not.
-- **`[HUMAN REVIEW]` anchor** → same `path` and the same surface (the
-  `[HUMAN REVIEW] <surface>` label).
 
 Skip any planned comment that is already covered:
 
@@ -336,8 +334,8 @@ Skip any planned comment that is already covered:
   including a pre-existing human comment); a duplicate is pure noise.
 
 Only post the comments **not** already covered. (The summary below is
-**upserted**, so it too is idempotent — see there.) This gate governs both
-comment kinds below.
+**upserted**, so it too is idempotent — see there.) This gate governs the FIX
+comments below.
 
 **FIX findings** — one POST each, with a ` ```suggestion ` block for concrete
 line-level replacements (one-click commit) or prose for structural fixes. Lead
@@ -361,37 +359,6 @@ gh api repos/{owner}/{repo}/pulls/{number}/comments --method POST \
   --input /tmp/bot-panel-review-loop-{number}-{i}.json \
   || echo "off-diff (422) -> fold this finding into the summary body"
 ```
-
-**Human-review anchors** — for each sensitive surface classified in 4a, post one
-inline comment at its representative anchor, leading with a `[HUMAN REVIEW]` tag
-and **no suggestion block** (it's "a human should scrutinize this", not a fix).
-Name the surface and what to check, so the human-review signal lands _on the
-exact code_ a person should read, not only in the summary.
-
-Apply the idempotency gate above, keyed by `path` + surface: **skip any surface
-already covered** — `resolved` (a human dispositioned it; never reopen) or
-`open` (already flagged, by this bot or a pre-existing human note). A
-`[HUMAN REVIEW]` note is a standing once-per-(file, surface) marker, posted at
-most once for the life of the PR; the surface still appears in the summary
-callout every tick, so suppressing the inline duplicate loses no signal. Post
-anchors only for surfaces **not** already covered:
-
-```bash
-# One per sensitive anchor. Same independent-POST + 422-fallback contract as FIX.
-cat > /tmp/bot-panel-review-loop-{number}-hr-{k}.json <<JSON
-{ "commit_id": "$HEAD", "path": "apps/api/src/auth/session.ts", "line": 88, "side": "RIGHT",
-  "body": "**[HUMAN REVIEW] Authentication.** This changes session/token handling; an automated panel should not be the only reviewer of auth. A human should confirm <the specific invariant: replay/ownership gate, token scope, expiry>." }
-JSON
-gh api repos/{owner}/{repo}/pulls/{number}/comments --method POST \
-  --input /tmp/bot-panel-review-loop-{number}-hr-{k}.json \
-  || echo "off-diff (422) -> the surface still appears in the summary callout"
-```
-
-Keep it to the **key anchor(s) per surface** (the load-bearing line), not every
-touched line — one well-placed `[HUMAN REVIEW]` note per surface beats spamming
-the diff. If a human-review anchor coincides with a FIX line, keep them as
-distinct comments (different tags, different intent). An anchor that 422s
-(somehow off-diff) is fine: the surface is still named in the summary callout.
 
 Then write the summary + verdict as one issue comment (also where the dedup
 marker lives). This body and the inline comments go to GitHub, so keep them
@@ -417,28 +384,49 @@ else
 fi
 ```
 
-Summary body (always written — posted or upserted — even with zero inline
-findings):
+Summary body — keep the **visible** body to just the three things a reader
+actually scans: the verdict, the panel (models + round count), and the head.
+Every findings list and the human-review note live in collapsed `<details>`
+accordions, so a reader expands only what they want. Always written (posted or
+upserted), even with zero inline findings. **Omit any findings accordion whose
+count is zero**; omit the human-review accordion only when no sensitive surface
+is touched. The blank line after each `<summary>` is required for GitHub to
+render the markdown inside.
 
 ```
 ## Panel review (advisory)
 
 **Verdict: <Approve | Do not approve yet>.** <one-line reason>
 
-Reviewed at {short head} by a fresh independent panel (gather-only; no code was changed).
+**Panel:** {name (model), name (model), ...} ({N} round, at {short head}; gather-only, no code was changed). <only-if-thin: note any supported CLI not on PATH, e.g. "codex and opencode were not detected, so consensus is single-panelist.">
 
-**Panel:** {name (model), name (model), ...} ({N} round). <only-if-thin: note any supported CLI not on PATH, e.g. "codex and opencode were not detected, so consensus is single-panelist.">
+<details>
+<summary><b>Recommend fixing ({count})</b></summary>
 
-> **Human review recommended ({sensitive surfaces touched}).** {one line on what to look at; anchored inline at the sensitive hunks}.
-
-### Recommend fixing ({count})
 - [SEV] file:line: issue. Fix: <suggested fix> (posted inline)
 
-### Off-diff / structural ({count})
+</details>
+
+<details>
+<summary><b>Off-diff / structural ({count})</b></summary>
+
 - [SEV] file:line: issue. Fix: <suggested fix>
 
-### Left alone ({count})
+</details>
+
+<details>
+<summary><b>Left alone ({count})</b></summary>
+
 - [SEV] file:line: finding. Why not fixed: <reason>
+
+</details>
+
+<details>
+<summary><b>Human review recommended ({sensitive surfaces touched})</b></summary>
+
+{one line on what a human should scrutinize}, at {file:line of each sensitive hunk}.
+
+</details>
 
 <!-- bot-panel-review-loop: head={headRefOid} -->
 ```
@@ -447,7 +435,8 @@ The marker line is mandatory and must carry the current head — the Step 1
 prefilter's engagement check depends on it. The **Panel** line is mandatory:
 list every panelist that ran as `name (model)` plus the round count, so the
 summary is self-describing about the panel's breadth (and flags a thin
-single-CLI run).
+single-CLI run). Everything else is collapsed by design — do not promote a
+findings list or the human-review note back into the visible body.
 
 **Verdict rule:** **Do not approve yet** if any FIX finding is CRITICAL/HIGH or
 a substantiated wrong-approach flag survives; **Approve** if only MEDIUM/LOW
@@ -455,9 +444,9 @@ polish remains ("clean, mergeable" is a valid verdict — don't manufacture
 blockers). The verdict is advisory prose; never cast a formal
 approval/request-changes, never merge.
 
-**Sensitive-surface catalog** (drives both the inline `[HUMAN REVIEW]` anchors
-in 4c and the summary callout; determine from the already-fetched changed-file
-list, not a fresh full-diff fetch):
+**Sensitive-surface catalog** (drives the collapsed human-review section of the
+summary in 4c; determine from the already-fetched changed-file list, not a fresh
+full-diff fetch):
 
 - **Authentication / authorization** — login, session, token, 2FA/passkey,
   device-link, replay/ownership gates, or RBAC
@@ -473,10 +462,11 @@ list, not a fresh full-diff fetch):
 
 The human-review recommendation is **independent of the verdict**: a clean panel
 verdict on auth or money is exactly when a human second look is most valuable,
-so an Approve still gets the callout and inline anchors. When the verdict is
-already **Do not approve yet** on a sensitive surface, still include them (the
-human reviews both the findings and the surface). Omit the callout entirely — no
-empty or "none" line — only when no sensitive surface is touched.
+so an Approve still gets the collapsed human-review section. When the verdict is
+already **Do not approve yet** on a sensitive surface, still include it (the
+human reviews both the findings and the surface). Omit the human-review section
+entirely — no empty or "none" accordion — only when no sensitive surface is
+touched.
 
 ### 4d. Settle the reaction to reflect the verdict
 
@@ -561,11 +551,11 @@ fixed-interval cron vs `/loop`'s dynamic self-pacing.
 | Re-targeting a finding onto a nearby diff line so it lands                                    | Mis-anchors on unrelated code; off-diff findings belong in the summary                                                                                                                                                                          |
 | Citing a pre-image / worktree-prefixed line                                                   | `line` is the post-image (RIGHT) number; `path` is repo-root-relative — confirm against `gh pr diff -- path` (4b)                                                                                                                               |
 | Suggestion block replacing the wrong span                                                     | Multi-line fixes need the `start_line`..`line` range, not a single `line`                                                                                                                                                                       |
-| Human-review only in the summary                                                              | Anchor a `[HUMAN REVIEW]` inline comment on each sensitive hunk too (4c) — the human-review note belongs on the code                                                                                                                            |
-| Re-posting a comment already on the PR (or one a human resolved)                              | Every comment is post-once — query `reviewThreads` (GraphQL exposes resolution state) before posting and skip FIX/HUMAN-REVIEW duplicates; upsert the summary (4c)                                                                              |
+| Posting a `[HUMAN REVIEW]` inline comment                                                     | Removed — the human-review note now lives only in the collapsed summary section, never anchored on the diff (4c)                                                                                                                                |
+| Re-posting a comment already on the PR (or one a human resolved)                              | Every comment is post-once — query `reviewThreads` (GraphQL exposes resolution state) before posting and skip FIX duplicates; upsert the summary (4c)                                                                                           |
 | Holding a prior do-not-approve for a disclosure/title finding the author fixed in the PR body | A description edit is not a commit, so it never shows in the compare diff — re-read `gh pr view --json title,body,labels` on an UPDATED re-review; a metadata/process finding resolves the moment the body discloses it (4a, incremental scope) |
 | Inferring a disclosure gap from a `docs:`-style title alone                                   | Judge disclosure against the actual PR body you fetched, not the title — the body may already call the sensitive change out (4a)                                                                                                                |
-| Skipping the human-review callout on a clean auth/money PR                                    | An Approve on a sensitive surface still wants a human; emit callout + anchors (4c)                                                                                                                                                              |
+| Bloating the visible summary, or skipping human review on a clean auth/money PR               | Keep the visible body to verdict + panel; collapse every findings list and the human-review note into `<details>`, and still include that note on a clean sensitive PR (4c)                                                                     |
 | Editing / committing a fix                                                                    | Advisory-only; it posts comments, never patches                                                                                                                                                                                                 |
 | Formal Approve / Request-changes / merge                                                      | Verdict is a plain comment; humans own the merge button                                                                                                                                                                                         |
 | Leaving 👀 after approve, or reacting 👎                                                      | 4d swaps 👀→🚀 on approve; do-not-approve keeps 👀; never 👎                                                                                                                                                                                    |

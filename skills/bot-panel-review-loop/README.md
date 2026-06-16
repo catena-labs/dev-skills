@@ -67,11 +67,12 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   gather-only panel review of that PR's diff, and posts back.
 - **Posts inline fix suggestions** at the correct file + line, with one-click
   ` ```suggestion ` blocks where the fix is concrete.
-- **Anchors "[HUMAN REVIEW]" notes** inline on sensitive hunks (auth, money
-  movement, schema, secrets) — flagging that an automated panel should not be
-  the only reviewer there.
-- **Posts an approve / do-not-approve summary** per PR, then swaps its 👀
-  reaction to 🚀 on an approve verdict (leaving 👀 when it left comments).
+- **Posts a concise approve / do-not-approve summary** per PR. The visible body
+  is just the verdict, the panel (models that ran), and the round count;
+  everything else — the findings lists and a human-review note for sensitive
+  surfaces (auth, money movement, schema, secrets) — folds into collapsible
+  `<details>` sections. It then swaps its 👀 reaction to 🚀 on an approve
+  verdict (leaving 👀 when it left comments).
 - **Tracks engagement (NEW / UPDATED / SEEN)** via a marker comment so it never
   re-posts identical findings tick after tick.
 
