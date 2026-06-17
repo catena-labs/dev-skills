@@ -56,11 +56,18 @@ target git repo (or pass `--repo owner/name` to the scanner).
   imports, trivially broken tests get appended fix commits. Anything
   non-mechanical — logic, flaky infra, or a fix touching auth, money movement,
   or schema — is reported and handed back to you.
-- **Triages review comments with a seen-ledger.** New reviewer threads are run
-  through the `triage-pr-comments` sub-skill; once you've handled or
-  deliberately deferred a thread, `mark-seen.sh` acks it so it stops
-  re-surfacing every tick. A later reviewer reply mints a fresh signature and
-  the thread comes back on its own.
+- **Triages review comments, then replies and resolves.** New reviewer threads —
+  both inline and root-level — are run through the `triage-pr-comments`
+  sub-skill, which owns the whole comment engine: the analysis _and_ the
+  reply/resolve mechanics (its "Reply and resolve" step is a mode-agnostic entry
+  point babysit drives non-interactively). When a comment leads to a fix, that
+  engine pushes the fix, posts a concise reply describing it, and **resolves**
+  the inline thread on GitHub (root-level comments get a reply and a ledger ack,
+  since GitHub can't resolve them). Threads you've deliberately left as standing
+  gates are acked in a local seen-ledger via `mark-seen.sh` so they stop
+  re-surfacing every tick; a later reviewer reply mints a fresh signature and
+  the thread comes back on its own. Replies to a human reviewer are still
+  drafted for your approval first.
 - **Stops and asks at the right moments.** Design/architecture change requests,
   conflicts with genuinely divergent intent, anything that would rewrite history
   on a non-draft PR, and CI fixes touching auth/money/schema all pause for you —

@@ -309,6 +309,13 @@ After presenting all analyses, print a summary table:
 
 ## Step 4: Interactive Resolution
 
+> **Autonomous callers skip this step.** This walkthrough is the human-driven
+> path. An autonomous caller (e.g. the `babysit-prs` skill running under
+> `/loop`) applies its own fix-selection policy instead — typically: auto-apply
+> clear, mechanical Fix verdicts; defer redesigns, scope changes, and anything
+> touching auth/money/schema to a human — then goes straight to Step 5, which is
+> written to run with or without this walkthrough in front of it.
+
 After presenting results, use **AskUserQuestion**:
 
 ```text
@@ -390,7 +397,17 @@ fix before applying.
 
 If **"done"**: end the skill.
 
-## Step 5: Commit and Reply
+## Step 5: Reply and resolve
+
+This is the **reply/resolve entry point**, and it is mode-agnostic: the
+mechanics below are identical whether they run after the interactive walkthrough
+(Step 4) or are driven non-interactively by an autonomous caller such as
+`babysit-prs`. Only the **reply-approval policy** differs — an interactive
+session carries the user's implicit per-fix approval from Step 4, whereas an
+autonomous caller applies its own gate (e.g. `babysit-prs` drafts human-facing
+replies for approval and auto-posts only bot replies). The push → reply →
+resolve ordering, the read-back verification, and the error handling are the
+same in both modes.
 
 After all fixes are implemented and verified (tests pass, linter clean):
 
@@ -410,9 +427,14 @@ After all fixes are implemented and verified (tests pass, linter clean):
      `repos/{owner}/{repo}/issues/{number}/comments` that quotes or `@`-mentions
      the original commenter and addresses their point. GitHub doesn't support
      nested replies on root-level PR comments.
-   - For **Fix** verdicts: briefly describe the fix applied.
-   - For **Dismiss** verdicts: explain concisely why the concern does not apply
-     (e.g., "no existing rows", "subsumed by the runtime guard", "naming
+   - **Keep every reply concise:** one or two sentences that lead with the
+     outcome, with no preamble and no restating the reviewer's comment back to
+     them.
+   - For **Fix** verdicts: briefly describe the fix applied and its commit sha
+     (e.g., "Fixed in a1b2c3d: now guards `user` against null before the
+     deref").
+   - For **Dismiss** verdicts: give the one-clause reason the concern does not
+     apply (e.g., "no existing rows", "subsumed by the runtime guard", "naming
      convention is self-documenting").
    - For bot nitpick comments that were filtered out in Step 1: ignore them
      entirely. Do not reply or acknowledge.
