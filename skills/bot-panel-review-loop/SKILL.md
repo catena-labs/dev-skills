@@ -4,16 +4,16 @@ description:
   Use when asked to sweep, review, or babysit the open PRs in a repo with a
   panel review and post advisory findings. For each open, CI-green,
   not-yet-approved PR that is either non-draft or a draft labeled "ready for
-  review", dispatch a fresh per-PR agent that reacts 👀, runs a
-  gather-only panel-review-loop, posts inline PR comments at the correct
-  file+line suggesting fixes, posts a concise approve/do-not-approve summary
-  (findings and a human-review note for sensitive surfaces — auth, money
-  movement, schema, secrets — folded into collapsible sections), and swaps its
-  👀 reaction to 🚀 on an approve verdict (leaving 👀 when it left comments). Tracks engagement (NEW / UPDATED /
-  SEEN) and posts each comment at most once (never re-posting one already on the
-  PR or one a human resolved; the summary is upserted), so it doesn't repeat work.
-  Read-only toward the code: it never edits,
-  commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
+  review", dispatch a fresh per-PR agent that reacts 👀, runs a gather-only
+  panel review, posts inline PR comments at the correct file+line suggesting
+  fixes, posts a concise approve/do-not-approve summary (findings and a
+  human-review note for sensitive surfaces — auth, money movement, schema,
+  secrets — folded into collapsible sections), and swaps its 👀 reaction to 🚀
+  on an approve verdict (leaving 👀 when it left comments). Tracks engagement
+  (NEW / UPDATED / SEEN) and posts each comment at most once (never re-posting
+  one already on the PR or one a human resolved; the summary is upserted), so it
+  doesn't repeat work. Read-only toward the code: it never edits, commits, or
+  pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
 allowed-tools:
   Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
 argument-hint: "[--all] [--exclude-own] [--dependabot]"
@@ -25,6 +25,18 @@ One invocation = one fleet-wide sweep of the repo's open PRs. The sweep selects
 the actionable PRs, then **dispatches one fresh agent per PR** to review it and
 post advisory comments back. **This skill never changes the code** — no edits,
 no commits, no pushes. Its only side effects are GitHub reactions and comments.
+
+Two bundled scripts carry every deterministic, no-judgment step so the bulky
+`gh`/`jq`/`graphql` plumbing never enters the model's context and the JSON is
+never hand-escaped:
+
+- **`select-prs.sh`** (Step 1) — selection: which PRs are actionable this tick.
+- **`pr-actions.sh`** (Step 4) — per-PR GitHub calls: re-confirm live state,
+  react, fetch existing threads, post comments, upsert the summary, settle the
+  reaction. Run `bash <skill-dir>/pr-actions.sh --help` for the verb list.
+
+The model keeps the judgment (which findings are real, the verdict, the comment
+and summary bodies); the scripts keep the plumbing.
 
 ## Running it
 
@@ -42,8 +54,7 @@ to be driven by `/loop`, so each tick is one fleet-wide sweep:
 /loop /bot-panel-review-loop --all --exclude-own --dependabot
 ```
 
-Each tick selects the actionable PRs and dispatches one fresh agent per PR;
-per-PR engagement markers keep it from re-reviewing a PR it already covered at
+Per-PR engagement markers keep it from re-reviewing a PR it already covered at
 the same head.
 
 ## Flags
@@ -106,13 +117,9 @@ sentinel-delimited sections:
 If `ACTIONABLE_JSON` is `[]`, nothing needs a panel this tick — print the table
 and go straight to Step 5.
 
-The gate definitions above are canonical; the script is their implementation. It
-settles `mergeable == UNKNOWN` once (gate 4) and guards the UPDATED incremental
-range (ahead → scoped re-review, identical → SEEN/skip, diverged → full
-re-review). Trust its output; only re-derive a disposition by hand (with
-`gh pr list` / `gh api .../comments` / `gh pr checks`) if the script errors or a
-result is clearly wrong. Everything the former Steps 2 (engagement) and 3 (CI)
-did now happens inside it.
+Trust the script's output; only re-derive a disposition by hand (with
+`gh pr list` / `gh api .../comments` / `gh pr checks`) if it errors or a result
+is clearly wrong. Every no-judgment gate now lives inside it.
 
 ## Step 4: Dispatch one fresh agent per actionable PR
 
@@ -120,26 +127,23 @@ One fresh isolated context per PR, done as subagents: the sweep stays cheap and
 each PR gets clean, uncontaminated context. Each agent owns exactly one PR, does
 Steps 4a-4d, and returns a one-line verdict. Inherit the session model — don't
 pin one; the judgment (which findings are real, the verdict) wants the strong
-model.
+model. The subagent doesn't load this skill, so **pass it the absolute path to
+`pr-actions.sh`** (the same `<skill-dir>` from Step 1) along with the brief.
 
 **Bound concurrency to 2-3 PRs at a time.** Each review runs `panel-review.sh`,
 which materializes one throwaway git worktree _per panelist_ under a `mktemp`
-dir pinned to the PR head (see below). Those linked worktrees share this repo's
-single `.git`, so fanning out every PR at once means (PRs x panelists)
-concurrent `git worktree add`/`remove` racing on `.git/worktrees` and
-index/config locks. Dispatch in small batches (or sequentially if a batch errors
-on a git lock) — fresh-context-per-PR is the goal, not maximum parallelism.
-
-### How the diff is fetched
+dir pinned to the PR head. Those linked worktrees share this repo's single
+`.git`, so fanning out every PR at once means (PRs x panelists) concurrent
+`git worktree add`/`remove` racing on `.git/worktrees` and index/config locks.
+Dispatch in small batches (or sequentially if a batch errors on a git lock) —
+fresh-context-per-PR is the goal, not maximum parallelism.
 
 The skill never checks out a PR into your working tree; the diff arrives over
-the GitHub API via `gh`. The **review** path (`panel-review-loop` →
-`panel-review.sh --pr {number}`) resolves metadata with `gh pr view`,
-materializes the per-panelist ephemeral worktrees, and each panelist runs
-`gh pr diff` itself inside its isolated, auto-removed worktree. The **comment**
-path (4b/4c) fetches no diff at all — comments post optimistically and GitHub
-422s off-diff lines; any per-finding sanity check pulls only that one path. So
-nothing here scales with PR size.
+the GitHub API via `gh`, so nothing here scales with PR size. The review path
+(`panel-review --pr {number}`) materializes the per-panelist ephemeral worktrees
+and each panelist runs `gh pr diff` inside its own; the comment path (4b/4c)
+fetches no diff at all — comments post optimistically and GitHub 422s off-diff
+lines, and any per-finding sanity check pulls only that one path.
 
 Give each agent the brief below, filling `{owner}/{repo}` and the entry's
 `number` and `head` from `ACTIONABLE_JSON`. For an **UPDATED** entry also pass
@@ -155,54 +159,45 @@ live state first** and bail before touching GitHub if it's no longer the ready,
 open PR you queued:
 
 ```bash
-gh pr view {number} -R {owner}/{repo} \
-  --json state,isDraft,headRefOid,mergeable,labels \
-  -q '"\(.state) \(.isDraft) \(.headRefOid) \(.mergeable) \([.labels[].name] | any(ascii_downcase == "ready for review"))"'
+bash <skill-dir>/pr-actions.sh confirm {number} {head}    # {head} = the queued head
 ```
 
-- `state != OPEN` → **skip, do not react or post**; report "skipped (merged)" /
-  "skipped (closed)". (It merged between the sweep and dispatch.)
-- `isDraft == true` **and the `ready for review` label is gone** (the trailing
-  field is `false`) → skip ("skipped (now draft)"). A draft that still carries
-  the label is a deliberate opt-in — proceed. (If the author both pushed and
-  removed the label, the head check below also defers it.)
-- `mergeable == CONFLICTING` → skip ("skipped (merge conflict)") — gate 4 again,
-  re-checked because it can flip after enumeration.
-- `headRefOid` differs from the queued head → the author just pushed; defer to
-  the next tick so the prefilter re-runs the engagement check against the new
-  head (so you don't double-review) and CI can settle.
+It prints one disposition line. Act on the first word:
 
-Only once it re-confirms as OPEN, reviewable (non-draft, or a draft still
-labeled `ready for review`), non-conflicting, at the expected head, mark it
-picked up (before the panel, so watchers see it in progress):
+- **`ok <head>`** → reviewable, at the expected head; proceed.
+- **`skip ...`** → report the reason verbatim (`skipped (merged)` / `(closed)` /
+  `(now draft)` / `(merge conflict)`) and stop — **do not react or post.** (A
+  draft still carrying the `ready for review` label is reviewable, so `confirm`
+  only skips a draft once the label is gone.)
+- **`defer ...`** → the author just pushed; defer to the next tick so the
+  prefilter re-runs the engagement check against the new head (no double-review)
+  and CI can settle.
+
+Only once it returns `ok`, mark the PR picked up (before the panel, so watchers
+see it in progress). The reaction dedupes per actor+content, so re-reacting on a
+re-review is a no-op:
 
 ```bash
-gh api repos/{owner}/{repo}/issues/{number}/reactions \
-  --method POST -H "Accept: application/vnd.github+json" -f content=eyes
+bash <skill-dir>/pr-actions.sh react {number}    # adds 👀
 ```
 
-The endpoint dedupes per actor+content, so re-reacting on a re-review is a
-no-op.
-
-Then invoke the **`panel-review-loop`** skill via the Skill tool, targeting the
-PR (`/panel-review-loop --pr {number}`), with one overriding instruction:
+Then invoke the **`panel-review`** skill via the Skill tool, targeting the PR
+(`/panel-review --pr {number}`), with one overriding instruction:
 
 > **Gather-only. Do NOT modify the working tree; do not edit, commit, or push.**
-> Produce the FIX / FOREGO judgment ledger and stop.
 
-With no fixes applied the loop has nothing to re-review, so it **collapses to a
-single gather-and-judge pass**. That is intended — don't spin extra rounds
-against unchanged code (it only resurfaces identical findings and reads as
-oscillation). Stay on `--pr {number}` throughout; never switch to
-`--uncommitted` (there are no working-tree fixes).
+A `--pr` panel review is a single gather-and-synthesize pass and is read-only by
+design (its panelists run worktree-isolated with GitHub-write forbidden), so
+this is exactly one fan-out — there is no fix/re-review loop to suppress and
+never a `--uncommitted` switch (there are no working-tree fixes). You apply the
+FIX/FOREGO judgment to its synthesis yourself (ledger below).
 
 **Record the panel composition and round count.** `panel-review` emits one
 `panel-review: <name> (<model>) done (exit N)` heartbeat per panelist; collect
 the `<name> (<model>)` pairs that actually ran (it auto-detects codex, claude,
-opencode on `PATH`, so a missing CLI silently shrinks the panel). Gather-only
-should always be **1 round** — surface the real number if it's higher. If only
-one panelist ran, say so in the summary (a single-panelist run is a thinner
-signal than a true multi-model panel).
+opencode on `PATH`, so a missing CLI silently shrinks the panel). It is always
+**1 round** here. If only one panelist ran, say so in the summary (a single
+panelist is a thinner signal than a true multi-model panel).
 
 The per-finding ledger: severity, `file:line`, the issue, the recommended fix,
 and the **FIX**/**FOREGO** verdict (with forego reason). Calibration:
@@ -223,17 +218,15 @@ moved but tree didn't, e.g. a base merge), skip and report "no new commits".
 This scoping is the only behavioral difference from a NEW review.
 
 **Re-evaluate a carried-forward finding against the surface that would resolve
-it, not the commit diff.** Before you hold the verdict on a finding raised last
-round, ask what would close it. A _code_ finding is closed by a change in the
-compare range (or still stands if its cited lines are unchanged) — the diff
-scope above covers that. But a **PR-metadata / process finding — a misleading
-title, a missing or wrong description, an undisclosed sensitive change (the
-CLAUDE.md "call it out in the PR description" gate), a missing `security-review`
-note, labels** — is closed by editing the PR's title/body/labels, and **a
-description edit is not a commit, so it never appears in the compare diff.** A
-commit-diff-scoped re-review is therefore structurally blind to it. Whenever a
-prior finding was about the title/description/disclosure rather than the code,
-re-read the live metadata before carrying it forward:
+it, not the commit diff.** A _code_ finding is closed by a change in the compare
+range (the diff scope above covers it). But a **PR-metadata / process finding —
+a misleading title, a missing or wrong description, an undisclosed sensitive
+change (the CLAUDE.md "call it out in the PR description" gate), a missing
+`security-review` note, labels** — is closed by editing the PR's title/body/
+labels, and **a description edit is not a commit, so it never appears in the
+compare diff.** A commit-diff-scoped re-review is structurally blind to it.
+Whenever a prior finding was about the title/description/disclosure, re-read the
+live metadata before carrying it forward:
 
 ```bash
 gh pr view {number} -R {owner}/{repo} --json title,body,labels
@@ -241,10 +234,9 @@ gh pr view {number} -R {owner}/{repo} --json title,body,labels
 
 If the body now discloses what the finding flagged, the finding is **resolved**
 — drop it and recompute the verdict. Never hold a do-not-approve on a disclosure
-or title gap the author has since closed in the PR body just because no _commit_
-touched it. The same rule governs a fresh review: judge a disclosure finding
-against the **actual PR body you fetched**, never inferred from a `docs:`-style
-title alone (the body may already call the change out).
+or title gap the author has since closed in the body. The same rule governs a
+fresh review: judge a disclosure finding against the **actual PR body you
+fetched**, never inferred from a `docs:`-style title alone.
 
 **Classify the sensitive surface while you have the changed-file list.** Using
 the catalog in 4c, record which surfaces (auth/authz, money movement,
@@ -254,7 +246,7 @@ note the `file:line` of the changed sensitive code (the new auth gate, the
 money-math line, the new migration column, the credential read), so the
 human-review note can point a reader at it. These surfaces populate the
 collapsed human-review section in the summary (4c) and the human-review flag
-returned to the sweep — they are no longer posted as inline comments.
+returned to the sweep — they are not posted as inline comments.
 
 ### 4b. Resolve the correct file + line for each finding
 
@@ -281,8 +273,6 @@ diff exactly. Per finding, get all four right:
 
 ```bash
 gh pr diff {number} -R {owner}/{repo} -- path/to/file.ts   # just that file's hunks
-# read the post-image to confirm the line content matches the finding:
-gh api repos/{owner}/{repo}/contents/path/to/file.ts?ref=$HEAD -q .content | base64 -d | sed -n 'N,Mp'
 ```
 
 Verify two things before posting: (1) the cited line content is the code the
@@ -292,96 +282,65 @@ an off-diff one to the summary instead.
 
 ### 4c. Post inline comments, then one summary comment
 
-Do **not** bundle into a single review object — a batched review is atomic, so
-one off-diff line 422s the whole thing. Post each comment as its own standalone
-inline review comment; a 422 on one falls back to the summary without losing the
-others.
-
 **Idempotency — post every comment at most once; never re-post one already on
 the PR or one a human resolved.** This skill re-runs on every UPDATED push, so
 without a guard it re-posts the same findings each tick — its cardinal sin.
-Before posting anything, fetch what is already on the PR. Inline comments live
-in review threads, and **only GraphQL exposes a thread's resolution state**
-(REST `pulls/{number}/comments` cannot tell you a human closed one):
+Before posting anything, fetch what is already on the PR (inline comments live
+in review threads, and only GraphQL exposes a thread's resolution state):
 
 ```bash
-# Every inline thread already on the PR: resolution state, path, and body head.
-gh api graphql -f owner={owner} -f repo={repo} -F num={number} -f query='
-query($owner:String!,$repo:String!,$num:Int!){
-  repository(owner:$owner,name:$repo){ pullRequest(number:$num){
-    reviewThreads(first:100){ nodes{
-      isResolved
-      comments(first:1){ nodes{ path body } }
-    } } } } }' \
-  -q '.data.repository.pullRequest.reviewThreads.nodes[]
-      | "\(if .isResolved then "resolved" else "open" end)\t\(.comments.nodes[0].path)\t\(.comments.nodes[0].body | gsub("\n";" ") | .[0:100])"'
+bash <skill-dir>/pr-actions.sh threads {number}
 ```
 
-Each line is a comment already on the PR — `resolved`/`open`, its `path`, and
-the start of its body. A planned comment is **already covered** when an existing
-thread targets the same code and makes the same point:
+Each line is `resolved|open <TAB> path <TAB> body[:100]`. A planned FIX comment
+is **already covered** when an existing thread targets the same `path` and makes
+the same point — match on the **issue** (the bold `[SEV]` headline), not the
+line number, since lines drift across commits but the point does not. Skip a
+planned comment that is already covered:
 
-- **FIX finding** → same `path` and the same one-line issue (the bold `[SEV]`
-  headline). Match on the **issue, not the line number** — lines drift across
-  commits, the point does not.
+- **resolved** → a human dispositioned it and closed the thread; re-posting
+  reopens a decision they made. Never re-post.
+- **open** → already on the PR (a prior tick, a human, anyone); a duplicate is
+  pure noise.
 
-Skip any planned comment that is already covered:
+Post only the FIX comments **not** already covered. Each one is its own
+standalone inline comment — never a batched review object (a batch is atomic, so
+one off-diff line 422s the whole thing). Lead the body with the `[SEVERITY]` tag
+and include a ` ```suggestion ` block for concrete line-level replacements
+(one-click commit) or prose for structural fixes. Write the body to a file and
+post it; the script pins the commit to the live head and 422-folds an off-diff
+line back to the summary for you:
 
-- **resolved** → a human dispositioned it (fixed it, or judged it not worth
-  fixing) and closed the thread; re-posting reopens a decision they made. Never
-  re-post.
-- **open** → it is already on the PR (a prior tick of this bot, or anyone,
-  including a pre-existing human comment); a duplicate is pure noise.
+````bash
+# Single line: just <path> <line>. Body file holds the raw markdown:
+#   **[HIGH] <one-line issue>**
+#
+#   <why it matters>
+#
+#   ```suggestion
+#   <exact replacement>
+#   ```
+bash <skill-dir>/pr-actions.sh comment {number} apps/api/src/foo.ts 42 /tmp/bot-panel-review-loop-{number}-{i}.md
 
-Only post the comments **not** already covered. (The summary below is
-**upserted**, so it too is idempotent — see there.) This gate governs the FIX
-comments below.
+# Multi-line range: add --start so the suggestion replaces exactly those lines.
+bash <skill-dir>/pr-actions.sh comment {number} apps/api/src/foo.ts 42 --start 40 /tmp/bot-panel-review-loop-{number}-{j}.md
+````
 
-**FIX findings** — one POST each, with a ` ```suggestion ` block for concrete
-line-level replacements (one-click commit) or prose for structural fixes. Lead
-with the `[SEVERITY]` tag. **Apply the gate above:** skip a finding already on
-the PR (same `path` + issue) or one a human resolved; post only the new ones.
+The script prints `posted` on success or `offdiff` when GitHub 422s the line —
+on `offdiff`, drop that finding into the summary's off-diff section instead.
 
-```bash
-HEAD=$(gh pr view {number} -R {owner}/{repo} --json headRefOid -q .headRefOid)
-# Single line: omit start_line. line = post-image line number, side = RIGHT.
-cat > /tmp/bot-panel-review-loop-{number}-{i}.json <<JSON
-{ "commit_id": "$HEAD", "path": "apps/api/src/foo.ts", "line": 42, "side": "RIGHT",
-  "body": "**[HIGH] <one-line issue>**\n\n<why it matters>\n\n\`\`\`suggestion\n<exact replacement>\n\`\`\`" }
-JSON
-# Multi-line: anchor the whole range so the suggestion replaces exactly those lines.
-cat > /tmp/bot-panel-review-loop-{number}-{j}.json <<JSON
-{ "commit_id": "$HEAD", "path": "apps/api/src/foo.ts", "start_line": 40, "start_side": "RIGHT",
-  "line": 42, "side": "RIGHT",
-  "body": "**[HIGH] <one-line issue>**\n\n<why it matters>\n\n\`\`\`suggestion\n<exact 3-line replacement>\n\`\`\`" }
-JSON
-gh api repos/{owner}/{repo}/pulls/{number}/comments --method POST \
-  --input /tmp/bot-panel-review-loop-{number}-{i}.json \
-  || echo "off-diff (422) -> fold this finding into the summary body"
-```
+Then write the summary + verdict as one issue comment. This body and the inline
+comments go to GitHub, so keep them em-dash-free (colons, commas, parens) per
+the repo's user-facing-prose convention.
 
-Then write the summary + verdict as one issue comment (also where the dedup
-marker lives). This body and the inline comments go to GitHub, so keep them
-em-dash-free (colons, commas, parens) per the repo's user-facing-prose
-convention.
-
-**Upsert it — one summary per PR, always current.** If this bot already left a
-summary (any comment carrying the `<!-- bot-panel-review-loop: head= -->`
-marker), edit that comment in place; only create a new one when none exists. So
-an UPDATED re-review refreshes the single summary (new verdict, new head marker)
-instead of stacking a fresh comment each tick.
+**Upsert it — one summary per PR, always current.** Write the raw markdown body
+(template below) to a file and hand it to `upsert`; it PATCHes the bot's
+existing marker-carrying comment in place if one exists, else POSTs a new one.
+So an UPDATED re-review refreshes the single summary (new verdict, new head
+marker) instead of stacking a fresh comment each tick:
 
 ```bash
-# Upsert: PATCH our latest marker-carrying comment if present, else POST a new one.
-PRIOR=$(gh api repos/{owner}/{repo}/issues/{number}/comments --paginate \
-  -q '[.[] | select(.body | test("<!-- bot-panel-review-loop: head=")) | .id] | last // empty')
-if [ -n "$PRIOR" ]; then
-  gh api repos/{owner}/{repo}/issues/comments/$PRIOR --method PATCH \
-    --input /tmp/bot-panel-review-loop-{number}-summary.json
-else
-  gh api repos/{owner}/{repo}/issues/{number}/comments --method POST \
-    --input /tmp/bot-panel-review-loop-{number}-summary.json
-fi
+bash <skill-dir>/pr-actions.sh upsert {number} /tmp/bot-panel-review-loop-{number}-summary.md
 ```
 
 Summary body — keep the **visible** body to just the three things a reader
@@ -391,7 +350,9 @@ accordions, so a reader expands only what they want. Always written (posted or
 upserted), even with zero inline findings. **Omit any findings accordion whose
 count is zero**; omit the human-review accordion only when no sensitive surface
 is touched. The blank line after each `<summary>` is required for GitHub to
-render the markdown inside.
+render the markdown inside. The `<!-- ... head= -->` marker is mandatory and
+must carry the current head — the Step 1 prefilter's engagement check depends on
+it.
 
 ```
 ## Panel review (advisory)
@@ -431,22 +392,21 @@ render the markdown inside.
 <!-- bot-panel-review-loop: head={headRefOid} -->
 ```
 
-The marker line is mandatory and must carry the current head — the Step 1
-prefilter's engagement check depends on it. The **Panel** line is mandatory:
-list every panelist that ran as `name (model)` plus the round count, so the
-summary is self-describing about the panel's breadth (and flags a thin
-single-CLI run). Everything else is collapsed by design — do not promote a
-findings list or the human-review note back into the visible body.
+The **Panel** line is mandatory: list every panelist that ran as `name (model)`
+plus the round count, so the summary is self-describing about the panel's
+breadth (and flags a thin single-CLI run). Everything else is collapsed by
+design — do not promote a findings list or the human-review note into the
+visible body.
 
 **Verdict rule:** **Do not approve yet** if any FIX finding is CRITICAL/HIGH or
 a substantiated wrong-approach flag survives; **Approve** if only MEDIUM/LOW
 polish remains ("clean, mergeable" is a valid verdict — don't manufacture
 blockers). The verdict is advisory prose; never cast a formal
-approval/request-changes, never merge.
+approval/request-changes, never merge — humans own the merge button.
 
-**Sensitive-surface catalog** (drives the collapsed human-review section of the
-summary in 4c; determine from the already-fetched changed-file list, not a fresh
-full-diff fetch):
+**Sensitive-surface catalog** (drives the collapsed human-review section;
+determine from the already-fetched changed-file list, not a fresh full-diff
+fetch):
 
 - **Authentication / authorization** — login, session, token, 2FA/passkey,
   device-link, replay/ownership gates, or RBAC
@@ -462,31 +422,21 @@ full-diff fetch):
 
 The human-review recommendation is **independent of the verdict**: a clean panel
 verdict on auth or money is exactly when a human second look is most valuable,
-so an Approve still gets the collapsed human-review section. When the verdict is
-already **Do not approve yet** on a sensitive surface, still include it (the
-human reviews both the findings and the surface). Omit the human-review section
-entirely — no empty or "none" accordion — only when no sensitive surface is
-touched.
+so an Approve still gets the collapsed human-review section, and a
+Do-not-approve on a sensitive surface still includes it (the human reviews
+both). Omit the section entirely — no empty or "none" accordion — only when no
+sensitive surface is touched.
 
 ### 4d. Settle the reaction to reflect the verdict
 
-The 👀 from 4a means "panel in progress". Once the summary is posted, swap it to
-a terminal reaction mirroring the verdict — never 👎 (a reject is too strong for
-an advisory panel):
+The 👀 from 4a means "panel in progress". Once the summary is posted, settle it
+to a terminal reaction mirroring the verdict (never 👎 — a reject is too strong
+for an advisory panel):
 
-- **Approve** → remove your 👀 and add 🚀 ("clean, ship it"):
-
-  ```bash
-  ME=$(gh api user -q .login)
-  RID=$(gh api repos/{owner}/{repo}/issues/{number}/reactions \
-    -H "Accept: application/vnd.github+json" \
-    -q ".[] | select(.user.login==\"$ME\" and .content==\"eyes\") | .id" | head -n1)
-  [ -n "$RID" ] && gh api repos/{owner}/{repo}/issues/{number}/reactions/$RID --method DELETE
-  gh api repos/{owner}/{repo}/issues/{number}/reactions \
-    --method POST -H "Accept: application/vnd.github+json" -f content=rocket
-  ```
-
-- **Do not approve yet** → leave the 👀 in place ("reviewed, see my comments").
+```bash
+# Approve → drop 👀, add 🚀 ("clean, ship it"). Do-not-approve → leave 👀 ("see my comments").
+bash <skill-dir>/pr-actions.sh settle {number} approve     # or: settle {number} comments
+```
 
 So the reaction alone tells a watcher the outcome: 🚀 = approved, 👀 = comments
 worth addressing. Reactions dedupe per actor+content, so the swap is idempotent
@@ -532,30 +482,10 @@ reason to back off and the user has not asked for the 5-minute default. Inherit
 the session model; never pin one.
 
 `/loop` keeps one continuous context — tokens accumulate across ticks and only
-shrink via auto-compaction; there is no per-iteration clear. This skill keeps
-the main context tiny anyway (heavy review work lives in discarded per-PR
-subagents; the sweep only retains the prefilter's compact output (the actionable
-JSON and report table) plus the per-PR verdicts). If you want a genuinely fresh
+shrink via auto-compaction. This skill keeps the main context tiny anyway (heavy
+review work lives in discarded per-PR subagents; the sweep only retains the
+prefilter's compact output plus the per-PR verdicts). For a genuinely fresh
 context every tick, drive it with `/schedule` (a cron routine) instead — each
 run is a new session, which works here because all NEW/UPDATED/SEEN state lives
 in the GitHub head markers, not in conversation memory. The trade is
 fixed-interval cron vs `/loop`'s dynamic self-pacing.
-
-## Common mistakes (the non-obvious ones)
-
-| Mistake                                                                                       | Reality                                                                                                                                                                                                                                         |
-| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Reacting / posting on a PR that merged mid-sweep                                              | Re-confirm live `state == OPEN` at dispatch (4a), not just at enumeration                                                                                                                                                                       |
-| Spinning extra panel-review-loop rounds                                                       | Gather-only collapses to one pass; unchanged code = same finds                                                                                                                                                                                  |
-| Posting an off-diff finding inline                                                            | GitHub 422s it — fold off-diff findings into the summary body                                                                                                                                                                                   |
-| Re-targeting a finding onto a nearby diff line so it lands                                    | Mis-anchors on unrelated code; off-diff findings belong in the summary                                                                                                                                                                          |
-| Citing a pre-image / worktree-prefixed line                                                   | `line` is the post-image (RIGHT) number; `path` is repo-root-relative — confirm against `gh pr diff -- path` (4b)                                                                                                                               |
-| Suggestion block replacing the wrong span                                                     | Multi-line fixes need the `start_line`..`line` range, not a single `line`                                                                                                                                                                       |
-| Posting a `[HUMAN REVIEW]` inline comment                                                     | Removed — the human-review note now lives only in the collapsed summary section, never anchored on the diff (4c)                                                                                                                                |
-| Re-posting a comment already on the PR (or one a human resolved)                              | Every comment is post-once — query `reviewThreads` (GraphQL exposes resolution state) before posting and skip FIX duplicates; upsert the summary (4c)                                                                                           |
-| Holding a prior do-not-approve for a disclosure/title finding the author fixed in the PR body | A description edit is not a commit, so it never shows in the compare diff — re-read `gh pr view --json title,body,labels` on an UPDATED re-review; a metadata/process finding resolves the moment the body discloses it (4a, incremental scope) |
-| Inferring a disclosure gap from a `docs:`-style title alone                                   | Judge disclosure against the actual PR body you fetched, not the title — the body may already call the sensitive change out (4a)                                                                                                                |
-| Bloating the visible summary, or skipping human review on a clean auth/money PR               | Keep the visible body to verdict + panel; collapse every findings list and the human-review note into `<details>`, and still include that note on a clean sensitive PR (4c)                                                                     |
-| Editing / committing a fix                                                                    | Advisory-only; it posts comments, never patches                                                                                                                                                                                                 |
-| Formal Approve / Request-changes / merge                                                      | Verdict is a plain comment; humans own the merge button                                                                                                                                                                                         |
-| Leaving 👀 after approve, or reacting 👎                                                      | 4d swaps 👀→🚀 on approve; do-not-approve keeps 👀; never 👎                                                                                                                                                                                    |

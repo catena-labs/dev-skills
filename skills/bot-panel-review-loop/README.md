@@ -42,13 +42,10 @@ npx skills add catena-labs/dev-skills --skill bot-panel-review-loop
 ```
 
 Each per-PR agent runs a gather-only
-[`panel-review-loop`](https://github.com/catena-labs/dev-skills/tree/main/skills/panel-review-loop),
-which in turn orchestrates
 [`panel-review`](https://github.com/catena-labs/dev-skills/tree/main/skills/panel-review)
-— so install both:
+(a single fan-out, read-only), so install it too:
 
 ```
-npx skills add catena-labs/dev-skills --skill panel-review-loop
 npx skills add catena-labs/dev-skills --skill panel-review
 ```
 
@@ -64,7 +61,11 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   flag filters, is NEW or UPDATED since the last review, has no merge conflicts,
   and has green CI.
 - **Dispatches one fresh agent per PR.** Each agent reacts 👀, runs a
-  gather-only panel review of that PR's diff, and posts back.
+  gather-only panel review of that PR's diff, and posts back. A second bundled
+  script, `pr-actions.sh`, carries the per-PR GitHub plumbing (re-confirm live
+  state, react, fetch existing threads, post comments, upsert the summary,
+  settle the reaction), so the agent never hand-assembles `gh`/`graphql` or
+  escapes comment JSON itself.
 - **Posts inline fix suggestions** at the correct file + line, with one-click
   ` ```suggestion ` blocks where the fix is concrete.
 - **Posts a concise approve / do-not-approve summary** per PR. The visible body
