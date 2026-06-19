@@ -69,8 +69,8 @@ emit_row() { # number title engagement result
 # either bound; large PRs get a deeper review (Tier 2: decompose into per-area
 # scoped reviews plus per-HIGH verification) per the SKILL.md Step 4 escalation
 # policy. Tunable.
-LARGE_CHANGED_FILES=40
-LARGE_ADDITIONS=1500
+LARGE_CHANGED_FILES=20
+LARGE_ADDITIONS=1000
 
 push_actionable() { # number title head engagement prev ci note adds dels files
   local adds=${8:-0} dels=${9:-0} files=${10:-0} size="small"

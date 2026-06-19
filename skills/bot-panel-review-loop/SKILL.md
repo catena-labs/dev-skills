@@ -109,8 +109,8 @@ sentinel-delimited sections:
   scopes an UPDATED re-review (`null` for NEW); `note` flags a diverged/rebased
   full re-review or a PR with no CI checks.
   `additions`/`deletions`/`changedFiles` are the total diff size vs base, and
-  `size` is `"small"` or `"large"` (the prefilter's thresholds, currently 40
-  changed files or 1500 additions); `size` drives the **Step 4 escalation
+  `size` is `"small"` or `"large"` (the prefilter's thresholds, currently 20
+  changed files or 1000 additions); `size` drives the **Step 4 escalation
   tier**. **This is the dispatch list for Step 4** — one agent per entry.
 - `===REPORT_TABLE===` — a prebuilt markdown table, one row per open PR
   (unlabeled drafts are dropped entirely, so they never appear). Every
