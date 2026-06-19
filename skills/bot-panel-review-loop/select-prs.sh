@@ -12,7 +12,8 @@
 # Output (stdout), two sections delimited by sentinel lines:
 #
 #   ===ACTIONABLE_JSON===
-#   [ {"number","title","head","engagement","prevReviewedHead","ci","note"}, ... ]
+#   [ {"number","title","head","engagement","prevReviewedHead","ci","note",
+#      "additions","deletions","changedFiles","size"}, ... ]
 #   ===REPORT_TABLE===
 #   | PR | Title | Engagement | Result | Panel | Human |
 #   | ... one row per open PR (unlabeled drafts dropped); actionable rows carry PENDING_VERDICT ... |
@@ -44,7 +45,7 @@ repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "failed to
 me=$(gh api user -q .login) || { echo "failed to resolve login" >&2; exit 1; }
 
 prs=$(gh pr list --state open --limit 100 \
-  --json number,title,headRefOid,isDraft,reviewDecision,mergeable,author,labels) \
+  --json number,title,headRefOid,isDraft,reviewDecision,mergeable,author,labels,additions,deletions,changedFiles) \
   || { echo "failed to list PRs" >&2; exit 1; }
 
 actionable_file=$(mktemp)
@@ -64,13 +65,27 @@ emit_row() { # number title engagement result
   printf '| #%s | %s | %s | %s | - | - |\n' "$1" "$2" "$3" "$4" >> "$report_file"
 }
 
-push_actionable() { # number title head engagement prev ci note
+# Size thresholds for the Step 4 escalation tier. A PR is "large" when it crosses
+# either bound; large PRs get a deeper review (Tier 2: decompose into per-area
+# scoped reviews plus per-HIGH verification) per the SKILL.md Step 4 escalation
+# policy. Tunable.
+LARGE_CHANGED_FILES=40
+LARGE_ADDITIONS=1500
+
+push_actionable() { # number title head engagement prev ci note adds dels files
+  local adds=${8:-0} dels=${9:-0} files=${10:-0} size="small"
+  if [ "$files" -ge "$LARGE_CHANGED_FILES" ] || [ "$adds" -ge "$LARGE_ADDITIONS" ]; then
+    size="large"
+  fi
   jq -nc \
     --argjson number "$1" --arg title "$2" --arg head "$3" \
     --arg engagement "$4" --arg prev "$5" --arg ci "$6" --arg note "$7" \
+    --argjson adds "$adds" --argjson dels "$dels" --argjson files "$files" \
+    --arg size "$size" \
     '{number:$number, title:$title, head:$head, engagement:$engagement,
       prevReviewedHead:(if $prev=="" then null else $prev end),
-      ci:$ci, note:(if $note=="" then null else $note end)}' >> "$actionable_file"
+      ci:$ci, note:(if $note=="" then null else $note end),
+      additions:$adds, deletions:$dels, changedFiles:$files, size:$size}' >> "$actionable_file"
 }
 
 # Pass 1: the gates expressible from the list payload alone. Emits one TSV row
@@ -127,7 +142,12 @@ while IFS=$'\t' read -r num head title disp draft; do
   fi
 
   [ "$draft" = "draft" ] && note="${note:+$note; }ready-for-review draft"
-  push_actionable "$num" "$title" "$head" "$engagement" "$prev" "$ci" "$note"
+  # Pull this candidate's diff size from the list payload (no extra API call) so
+  # Step 4 can pick an escalation tier. Candidates are few, so the per-PR jq is cheap.
+  read -r adds dels files < <(printf '%s' "$prs" | jq -r --argjson n "$num" \
+    '.[] | select(.number==$n) | "\(.additions) \(.deletions) \(.changedFiles)"')
+  push_actionable "$num" "$title" "$head" "$engagement" "$prev" "$ci" "$note" \
+    "${adds:-0}" "${dels:-0}" "${files:-0}"
   emit_row "$num" "$title" "$engagement" "PENDING_VERDICT"
 done < <(printf '%s' "$prs" | jq -r \
   --arg me "$me" \
