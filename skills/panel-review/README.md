@@ -26,6 +26,35 @@ panelists from your phrasing:
 - "panel review this branch against main"
 - "panel review the auth changes, focus on session handling"
 - "panel review with just codex and claude"
+- "panel review with claude on opus-4.8 and two opencode reviewers, one on
+  qwen-3.7 and one on glm-5.2" — pick reviewers _and_ their models, including
+  running the same backend more than once
+
+## Choosing reviewers and models
+
+Each reviewer is a `--panelist backend[:model]` spec, where backend is `codex`,
+`claude`, or `opencode`, and the optional `:model` is forwarded to that CLI. The
+same backend can appear multiple times with different models, so you can fan one
+change out to several models of the same tool:
+
+```bash
+panel-review.sh \
+  --panelist claude:opus-4.8 \
+  --panelist opencode:qwen-3.7 \
+  --panelist opencode:glm-5.2
+```
+
+Equivalently, set them from the environment (used when no `--panelist` flag is
+passed):
+
+```bash
+PANEL_REVIEW_PANELISTS="claude:opus-4.8 opencode:qwen-3.7 opencode:glm-5.2" panel-review.sh
+```
+
+A bare backend (`--panelist claude`) uses that backend's `CLAUDE_MODEL` /
+`CODEX_MODEL` / `OPENCODE_MODEL` env default, or the CLI's own default if unset.
+Each reviewer gets a unique id (e.g. `opencode-qwen-3.7`) so two reviewers on
+the same backend keep separate worktrees, output files, and report sections.
 
 Add "deep" / "verify each finding" / "dig into the findings" to opt into deep
 mode: after the panelists finish, the coordinator spins off verification
