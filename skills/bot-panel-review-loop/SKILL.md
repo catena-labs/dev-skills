@@ -2,9 +2,9 @@
 name: bot-panel-review-loop
 description:
   Use when asked to sweep, review, or babysit the open PRs in a repo with a
-  panel review and post advisory findings. For each open, CI-green,
-  not-yet-approved PR that is either non-draft or a draft labeled "ready for
-  review", dispatch a fresh per-PR agent that reacts 👀, runs a gather-only
+  panel review and post advisory findings. For each open, CI-green PR that is
+  either non-draft or a draft labeled "ready for review" (human-approved PRs
+  included), dispatch a fresh per-PR agent that reacts 👀, runs a gather-only
   panel review, posts inline PR comments at the correct file+line suggesting
   fixes, posts a concise approve/do-not-approve summary (findings and a
   human-review note for sensitive surfaces — auth, money movement, schema,
@@ -17,7 +17,7 @@ description:
   commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
 allowed-tools:
   Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
-argument-hint: "[--all] [--exclude-own] [--dependabot]"
+argument-hint: "[--exclude-own] [--dependabot]"
 ---
 
 # Bot Panel Review Loop
@@ -52,7 +52,7 @@ to be driven by `/loop`, so each tick is one fleet-wide sweep:
 /bot-panel-review-loop
 
 # Flags pass straight through (see "Flags" below).
-/loop /bot-panel-review-loop --all --exclude-own --dependabot
+/loop /bot-panel-review-loop --exclude-own --dependabot
 ```
 
 Per-PR engagement markers keep it from re-reviewing a PR it already covered at
@@ -60,9 +60,11 @@ the same head.
 
 ## Flags
 
-- `--all` — include already-approved PRs (default: skip approved).
 - `--exclude-own` — skip PRs you authored (default: include them).
 - `--dependabot` — include Dependabot PRs (default: skip them).
+
+Already-approved PRs are reviewed by default; there is no flag to skip them (the
+engagement marker already prevents re-reviewing one at the same head).
 
 ## Selection gates (a PR is reviewed only if ALL hold)
 
@@ -74,7 +76,7 @@ These are the canonical gate definitions; later steps reference them by number.
    opted into review, so it runs the same remaining gates as an active PR.
    Re-confirmed live just before dispatch (Step 4a), since enumeration only
    proves a PR was open _then_.
-2. **Passes the flag filters** above (own / approved / dependabot).
+2. **Passes the flag filters** above (own / dependabot).
 3. **Engagement is NEW or UPDATED** (classified by the Step 1 prefilter). `SEEN`
    (already reviewed at this exact head, nothing new) is skipped — re-posting
    identical findings every tick is this skill's cardinal sin.
@@ -97,7 +99,7 @@ output never enter your context:
 ```bash
 # Replace <skill-dir> with this skill's base directory (printed as
 # "Base directory for this skill" when the skill loads).
-bash <skill-dir>/select-prs.sh [--all] [--exclude-own] [--dependabot]
+bash <skill-dir>/select-prs.sh [--exclude-own] [--dependabot]
 ```
 
 Pass through whatever flags the invocation received. The script prints two

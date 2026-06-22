@@ -25,16 +25,15 @@
 # dispatches one review agent per actionable entry, then replaces each
 # PENDING_VERDICT row with the returned verdict.
 #
-# Flags mirror the skill: --all (include approved), --exclude-own,
-# --dependabot (include dependabot). Targets bash 3.2 (macOS system bash).
+# Flags mirror the skill: --exclude-own, --dependabot (include dependabot).
+# Targets bash 3.2 (macOS system bash). Human-approved PRs are reviewed like any
+# other (the engagement marker still skips one already reviewed at this head).
 set -uo pipefail
 
-INCLUDE_APPROVED=0
 EXCLUDE_OWN=0
 INCLUDE_DEPENDABOT=0
 for arg in "$@"; do
   case "$arg" in
-    --all) INCLUDE_APPROVED=1 ;;
     --exclude-own) EXCLUDE_OWN=1 ;;
     --dependabot) INCLUDE_DEPENDABOT=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
@@ -45,7 +44,7 @@ repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "failed to
 me=$(gh api user -q .login) || { echo "failed to resolve login" >&2; exit 1; }
 
 prs=$(gh pr list --state open --limit 100 \
-  --json number,title,headRefOid,isDraft,reviewDecision,mergeable,author,labels,additions,deletions,changedFiles) \
+  --json number,title,headRefOid,isDraft,mergeable,author,labels,additions,deletions,changedFiles) \
   || { echo "failed to list PRs" >&2; exit 1; }
 
 actionable_file=$(mktemp)
@@ -153,7 +152,6 @@ while IFS=$'\t' read -r num head title disp draft; do
   emit_row "$num" "$title" "$engagement" "PENDING_VERDICT"
 done < <(printf '%s' "$prs" | jq -r \
   --arg me "$me" \
-  --argjson inclApproved "$INCLUDE_APPROVED" \
   --argjson exclOwn "$EXCLUDE_OWN" \
   --argjson inclDep "$INCLUDE_DEPENDABOT" '
   .[]
@@ -164,7 +162,6 @@ done < <(printf '%s' "$prs" | jq -r \
             or ([.labels[].name] | any(ascii_downcase == "ready for review")) )
   | [ (.number|tostring), .headRefOid, .title,
       ( if (((.author.login // "") | test("dependabot"))) and ($inclDep==0) then "skip:dependabot → skipped"
-        elif (.reviewDecision=="APPROVED") and ($inclApproved==0) then "skip:approved → skipped"
         elif (.author.login==$me) and ($exclOwn==1) then "skip:own PR → skipped"
         elif .mergeable=="CONFLICTING" then "skip:skipped (merge conflict)"
         elif .mergeable=="UNKNOWN" then "recheck:"

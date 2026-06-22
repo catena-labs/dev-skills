@@ -22,7 +22,7 @@ with the `/loop` command so each tick is one fleet-wide sweep:
 /bot-panel-review-loop
 
 # Flags pass straight through (see "Flags" below).
-/loop /bot-panel-review-loop --all --exclude-own --dependabot
+/loop /bot-panel-review-loop --exclude-own --dependabot
 ```
 
 Per-PR engagement markers (an HTML comment the skill posts on each PR) keep it
@@ -31,9 +31,11 @@ loop indefinitely.
 
 ### Flags
 
-- `--all` — include already-approved PRs (default: skip approved).
 - `--exclude-own` — skip PRs you authored (default: include them).
 - `--dependabot` — include Dependabot PRs (default: skip them).
+
+Already-approved PRs are reviewed by default (the engagement marker still keeps
+it from re-reviewing one at the same head).
 
 ## Install
 
