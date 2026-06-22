@@ -38,7 +38,7 @@ in the sections below):
 For Tier-2 PRs (large, or large + sensitive), get deep per-area review without:
 
 - losing cross-cutting bugs at the seams between areas,
-- breaking the "one PR -> one summary -> one marker" idempotency model,
+- breaking the inline-comment dedup + engagement-marker model,
 - multiplying `panel-review` git-worktree contention, or
 - spending unbounded tokens.
 
@@ -49,8 +49,7 @@ out a small set of gather-only sub-reviews, then a **synthesizer** merges and
 posts once. Panelists never decompose — they are non-interactive CLI
 subprocesses that return findings and nothing else; the orchestrator is the only
 actor that already holds the changed-file list (fetched for sensitive-surface
-classification and UPDATED incremental scope), so it is the natural and only
-place to chunk.
+classification), so it is the natural and only place to chunk.
 
 1. **Chunk the changed-file list — semantically, with surface isolation.** The
    orchestrator reads the changed-file list (and a cheap diff summary) and
@@ -66,11 +65,9 @@ place to chunk.
    constraint is non-negotiable either way.)
 
 2. **One scoped reviewer per chunk.** Each reviewer reads the **full diff for
-   context** but raises findings **only on its assigned paths**. This is the
-   exact mechanism already in `SKILL.md` 4a for UPDATED incremental scope
-   ("raise findings only on hunks in range; the rest is read-only context") —
-   reused to preserve cross-cutting awareness while parallelizing the close
-   read. Reuse, do not reinvent.
+   context** but raises findings **only on its assigned paths** — the rest of
+   the diff is read-only context, not re-litigated. This scoping is what
+   preserves cross-cutting awareness while parallelizing the close read.
 
 3. **One seam reviewer.** A contract change in `packages/X` that breaks a caller
    in `apps/Y` is exactly what chunk-local reviewers miss. One pass reads the
@@ -85,9 +82,9 @@ place to chunk.
    issue (the `[SEV]` headline, not the line), applies the global FIX/FOREGO
    calibration, runs Tier-1 adversarial verification on surviving HIGH/CRITICAL,
    and is the **only** actor that touches GitHub: posts the not-already-covered
-   inline comments and upserts the single summary via `pr-actions.sh`. Chunk and
-   seam reviewers are pure gather-only and **return** their ledgers; they never
-   post. This is what keeps idempotency intact.
+   inline comments and posts the summary via `pr-actions.sh`. Chunk and seam
+   reviewers are pure gather-only and **return** their ledgers; they never post.
+   This is what keeps idempotency intact.
 
 ## Why the depth-vs-cost knob is the panel, not the chunking
 
@@ -123,7 +120,7 @@ review stage  -> parallel: one scoped reviewer per chunk
                           + the whole-PR panel (panel-review --pr) once
                  each returns a typed ledger; none post
 synth stage   -> one synthesizer: union -> dedupe -> calibrate -> verify
-                 -> post inline + upsert summary + settle (the only GitHub writes)
+                 -> post inline + post summary + settle (the only GitHub writes)
 ```
 
 A workflow gives a deterministic fan-out, a real synthesizer stage with every
@@ -143,10 +140,11 @@ hatch.
 
 ## Posting / idempotency (unchanged contract)
 
-- Exactly one summary comment, one `<!-- bot-panel-review-loop: head= -->`
-  marker, one `settle`. Only the synthesizer posts.
-- The synthesizer still runs the `threads` dedup before posting, so re-reviews
-  on UPDATED pushes do not double-post — same rule as today.
+- Exactly one fresh summary comment (carrying the
+  `<!-- bot-panel-review-loop: head= -->` marker) and one `settle` per review.
+  Only the synthesizer posts.
+- The synthesizer still runs the `threads` dedup before posting inline comments,
+  so re-reviews on UPDATED pushes do not double-post them — same rule as today.
 - The reviewers' ledgers are in-memory return values, never GitHub writes, so a
   chunk reviewer dying mid-run leaves no partial state on the PR.
 

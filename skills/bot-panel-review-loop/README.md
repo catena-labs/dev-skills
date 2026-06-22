@@ -55,17 +55,17 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
 
 - **Selects the actionable PRs deterministically.** A bundled `select-prs.sh`
   prefilter applies every no-judgment gate (draft / flag filters / merge
-  conflict / engagement marker / incremental compare / CI status) in one script,
-  so the bulky `gh` JSON never enters the model's context. A PR is reviewed only
-  if it is open, not a draft (unless labeled `ready for review`), passes the
-  flag filters, is NEW or UPDATED since the last review, has no merge conflicts,
-  and has green CI.
+  conflict / engagement marker / CI status) in one script, so the bulky `gh`
+  JSON never enters the model's context. A PR is reviewed only if it is open,
+  not a draft (unless labeled `ready for review`), passes the flag filters, is
+  NEW or UPDATED since the last review, has no merge conflicts, and has green
+  CI.
 - **Dispatches one fresh agent per PR.** Each agent reacts 👀, runs a
   gather-only panel review of that PR's diff, and posts back. A second bundled
   script, `pr-actions.sh`, carries the per-PR GitHub plumbing (re-confirm live
-  state, react, fetch existing threads, post comments, upsert the summary,
-  settle the reaction), so the agent never hand-assembles `gh`/`graphql` or
-  escapes comment JSON itself.
+  state, react, fetch existing threads, post comments, post the summary, settle
+  the reaction), so the agent never hand-assembles `gh`/`graphql` or escapes
+  comment JSON itself.
 - **Posts inline fix suggestions** at the correct file + line, with one-click
   ` ```suggestion ` blocks where the fix is concrete.
 - **Posts a concise approve / do-not-approve summary** per PR. The visible body
@@ -74,8 +74,10 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   surfaces (auth, money movement, schema, secrets) — folds into collapsible
   `<details>` sections. It then swaps its 👀 reaction to 🚀 on an approve
   verdict (leaving 👀 when it left comments).
-- **Tracks engagement (NEW / UPDATED / SEEN)** via a marker comment so it never
-  re-posts identical findings tick after tick.
+- **Tracks engagement (NEW / UPDATED / SEEN)** via a marker comment, so it
+  re-reviews the whole PR only when it has new commits and never re-posts an
+  inline finding already on the PR. Each review still leaves a fresh summary
+  comment, so the PR keeps a running history of verdicts.
 
 ## What it does NOT do
 

@@ -38,11 +38,11 @@
 #       line — the agent then folds that finding into the summary instead.
 #       --start makes it a multi-line range (start_line..line, both RIGHT).
 #
-#   upsert <num> <body-file>
-#       Upsert the single summary comment (4c): PATCH our latest marker-carrying
-#       comment if one exists, else POST a new one. <body-file> holds the raw
-#       markdown summary; the script wraps it as JSON. Matches the current
-#       bot-panel-review-loop marker and the legacy panel-review-prs marker.
+#   summary <num> <body-file>
+#       Post a fresh summary comment (4c). A new comment is posted on every
+#       review, so the PR keeps a running history of verdicts rather than one
+#       overwritten summary. <body-file> holds the raw markdown summary; the
+#       script wraps it as JSON (the body's marker is read by the prefilter).
 #
 # Targets bash 3.2 (macOS system bash).
 set -uo pipefail
@@ -157,19 +157,12 @@ case "$verb" in
     fi
     ;;
 
-  upsert)
+  summary)
     body_file="${args[2]:-}"
-    [[ -n "$body_file" && -f "$body_file" ]] || { echo "pr-actions.sh: upsert needs <num> <body-file>" >&2; exit 2; }
+    [[ -n "$body_file" && -f "$body_file" ]] || { echo "pr-actions.sh: summary needs <num> <body-file>" >&2; exit 2; }
     payload="$(jq -Rs '{body: .}' < "$body_file")"
-    prior="$(gh api "repos/$REPO/issues/$num/comments" --paginate \
-      -q '[.[] | select(.body | test("<!-- (bot-panel-review-loop|panel-review-prs): head=")) | .id] | last // empty')"
-    if [[ -n "$prior" ]]; then
-      printf '%s' "$payload" | gh api "repos/$REPO/issues/comments/$prior" --method PATCH --input - >/dev/null \
-        && echo "pr-actions.sh: upserted summary on #$num (PATCH $prior)" >&2
-    else
-      printf '%s' "$payload" | gh api "repos/$REPO/issues/$num/comments" --method POST --input - >/dev/null \
-        && echo "pr-actions.sh: posted summary on #$num (new)" >&2
-    fi
+    printf '%s' "$payload" | gh api "repos/$REPO/issues/$num/comments" --method POST --input - >/dev/null \
+      && echo "pr-actions.sh: posted summary on #$num (new)" >&2
     ;;
 
   *) echo "pr-actions.sh: unknown verb: $verb (try --help)" >&2; exit 2 ;;

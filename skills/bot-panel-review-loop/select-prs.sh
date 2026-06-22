@@ -3,7 +3,7 @@
 # Deterministic prefilter for the bot-panel-review-loop skill.
 #
 # Runs every selection gate that needs no LLM judgment (draft / flag filters /
-# merge conflict / engagement marker / incremental compare / CI status) and
+# merge conflict / engagement marker / CI status) and
 # emits only the distilled result, so the giant `gh pr list` JSON, the per-PR
 # marker reads, and the CI-check output never enter the model's context. The
 # heavy work the script intentionally leaves to the LLM is the panel review and
@@ -12,7 +12,7 @@
 # Output (stdout), two sections delimited by sentinel lines:
 #
 #   ===ACTIONABLE_JSON===
-#   [ {"number","title","head","engagement","prevReviewedHead","ci","note",
+#   [ {"number","title","head","engagement","ci","note",
 #      "additions","deletions","changedFiles","size"}, ... ]
 #   ===REPORT_TABLE===
 #   | PR | Title | Engagement | Result | Panel | Human |
@@ -72,18 +72,17 @@ emit_row() { # number title engagement result
 LARGE_CHANGED_FILES=20
 LARGE_ADDITIONS=1000
 
-push_actionable() { # number title head engagement prev ci note adds dels files
-  local adds=${8:-0} dels=${9:-0} files=${10:-0} size="small"
+push_actionable() { # number title head engagement ci note adds dels files
+  local adds=${7:-0} dels=${8:-0} files=${9:-0} size="small"
   if [ "$files" -ge "$LARGE_CHANGED_FILES" ] || [ "$adds" -ge "$LARGE_ADDITIONS" ]; then
     size="large"
   fi
   jq -nc \
     --argjson number "$1" --arg title "$2" --arg head "$3" \
-    --arg engagement "$4" --arg prev "$5" --arg ci "$6" --arg note "$7" \
+    --arg engagement "$4" --arg ci "$5" --arg note "$6" \
     --argjson adds "$adds" --argjson dels "$dels" --argjson files "$files" \
     --arg size "$size" \
     '{number:$number, title:$title, head:$head, engagement:$engagement,
-      prevReviewedHead:(if $prev=="" then null else $prev end),
       ci:$ci, note:(if $note=="" then null else $note end),
       additions:$adds, deletions:$dels, changedFiles:$files, size:$size}' >> "$actionable_file"
 }
@@ -113,6 +112,8 @@ while IFS=$'\t' read -r num head title disp draft; do
   fi
 
   # --- candidate: engagement classification ---
+  # UPDATED gets the same full-PR re-review as NEW; the marker only tells us
+  # whether there is anything new to look at since the last review at all.
   prev=$(last_marker "$num")
   note=""
   if [ -z "$prev" ]; then
@@ -120,13 +121,14 @@ while IFS=$'\t' read -r num head title disp draft; do
   elif [ "$prev" = "$head" ]; then
     emit_row "$num" "$title" "SEEN" "skipped (reviewed at this head)"; continue
   else
+    # Head moved since the last review. "identical" means the tree did not change
+    # (e.g. a base merge) so there is nothing new to review; anything else (ahead,
+    # diverged/rebased, or compare unavailable) is UPDATED and re-reviewed in full.
     status=$(gh api "repos/$repo/compare/$prev...$head" -q .status 2>/dev/null)
-    case "$status" in
-      ahead)     engagement="UPDATED" ;;
-      identical) emit_row "$num" "$title" "SEEN" "skipped (no new commits)"; continue ;;
-      diverged)  engagement="NEW"; note="rebased: full re-review"; prev="" ;;
-      *)         engagement="NEW"; note="compare unavailable: full re-review"; prev="" ;;
-    esac
+    if [ "$status" = "identical" ]; then
+      emit_row "$num" "$title" "SEEN" "skipped (no new commits)"; continue
+    fi
+    engagement="UPDATED"
   fi
 
   # --- CI gate (gate 5) ---
@@ -146,7 +148,7 @@ while IFS=$'\t' read -r num head title disp draft; do
   # Step 4 can pick an escalation tier. Candidates are few, so the per-PR jq is cheap.
   read -r adds dels files < <(printf '%s' "$prs" | jq -r --argjson n "$num" \
     '.[] | select(.number==$n) | "\(.additions) \(.deletions) \(.changedFiles)"')
-  push_actionable "$num" "$title" "$head" "$engagement" "$prev" "$ci" "$note" \
+  push_actionable "$num" "$title" "$head" "$engagement" "$ci" "$note" \
     "${adds:-0}" "${dels:-0}" "${files:-0}"
   emit_row "$num" "$title" "$engagement" "PENDING_VERDICT"
 done < <(printf '%s' "$prs" | jq -r \

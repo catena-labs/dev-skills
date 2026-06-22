@@ -10,10 +10,11 @@ description:
   human-review note for sensitive surfaces — auth, money movement, schema,
   secrets — folded into collapsible sections), and swaps its 👀 reaction to 🚀
   on an approve verdict (leaving 👀 when it left comments). Tracks engagement
-  (NEW / UPDATED / SEEN) and posts each comment at most once (never re-posting
-  one already on the PR or one a human resolved; the summary is upserted), so it
-  doesn't repeat work. Read-only toward the code: it never edits, commits, or
-  pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
+  (NEW / UPDATED / SEEN), re-reviewing the whole PR whenever it has new commits
+  and posting each inline comment at most once (never re-posting one already on
+  the PR or one a human resolved), while writing a fresh summary comment each
+  review, so it doesn't repeat work. Read-only toward the code: it never edits,
+  commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
 allowed-tools:
   Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
 argument-hint: "[--all] [--exclude-own] [--dependabot]"
@@ -32,7 +33,7 @@ never hand-escaped:
 
 - **`select-prs.sh`** (Step 1) — selection: which PRs are actionable this tick.
 - **`pr-actions.sh`** (Step 4) — per-PR GitHub calls: re-confirm live state,
-  react, fetch existing threads, post comments, upsert the summary, settle the
+  react, fetch existing threads, post comments, post the summary, settle the
   reaction. Run `bash <skill-dir>/pr-actions.sh --help` for the verb list.
 
 The model keeps the judgment (which findings are real, the verdict, the comment
@@ -89,9 +90,9 @@ These are the canonical gate definitions; later steps reference them by number.
 ## Step 1: Select the actionable PRs (prefilter script)
 
 Run the prefilter. It applies every selection gate that needs no judgment (draft
-/ flag filters / merge conflict / engagement marker / incremental compare / CI
-status) inside one script, so the `gh pr list` JSON, the per-PR marker reads,
-and the CI-check output never enter your context:
+/ flag filters / merge conflict / engagement marker / CI status) inside one
+script, so the `gh pr list` JSON, the per-PR marker reads, and the CI-check
+output never enter your context:
 
 ```bash
 # Replace <skill-dir> with this skill's base directory (printed as
@@ -104,10 +105,9 @@ sentinel-delimited sections:
 
 - `===ACTIONABLE_JSON===` — a JSON array of the PRs that survived every gate,
   each
-  `{number, title, head, engagement, prevReviewedHead, ci, note, additions, deletions, changedFiles, size}`.
-  `engagement` is `NEW` or `UPDATED`; `prevReviewedHead` is the watermark that
-  scopes an UPDATED re-review (`null` for NEW); `note` flags a diverged/rebased
-  full re-review or a PR with no CI checks.
+  `{number, title, head, engagement, ci, note, additions, deletions, changedFiles, size}`.
+  `engagement` is `NEW` or `UPDATED` (UPDATED = there are new commits since the
+  last review); `note` flags a PR with no CI checks.
   `additions`/`deletions`/`changedFiles` are the total diff size vs base, and
   `size` is `"small"` or `"large"` (the prefilter's thresholds, currently 20
   changed files or 1000 additions); `size` drives the **Step 4 escalation
@@ -150,10 +150,10 @@ fetches no diff at all — comments post optimistically and GitHub 422s off-diff
 lines, and any per-finding sanity check pulls only that one path.
 
 Give each agent the brief below, filling `{owner}/{repo}` and the entry's
-`number` and `head` from `ACTIONABLE_JSON`. For an **UPDATED** entry also pass
-its `prevReviewedHead` (scopes findings to the new commits); for **NEW** it is
-`null`, so omit it. If the entry carries a `note` (rebased/diverged full
-re-review, or no CI checks), pass it along so the agent can mention it.
+`number` and `head` from `ACTIONABLE_JSON`. NEW and UPDATED entries get the same
+review — the whole PR (the engagement label only distinguishes them in the
+report). If the entry carries a `note` (e.g. no CI checks), pass it along so the
+agent can mention it.
 
 ### 4a. Re-confirm actionable, react 👀, gather findings, classify surfaces
 
@@ -270,36 +270,28 @@ default). severity = trigger probability x consequence; narrow or self-healing
 edges are LOW. Auth, money (`@bank/money`, `services/transfers.ts`), and
 schema/migration findings warrant extra weight per the repo's CLAUDE.md.
 
-**UPDATED only — incremental scope.** When given `{prevReviewedHead}`, confine
-new findings to the commits added since. Pull the changed paths with
-`gh api repos/{owner}/{repo}/compare/{prevReviewedHead}...{headRefOid} -q '.files[].filename'`
-and instruct the panel to raise findings **only on hunks introduced in that
-range** — the rest of the PR is read-only context, not re-litigated (a finding
-on an unchanged line was posted last round or deliberately left alone, so
-re-posting reads as oscillation). If the compare shows zero added commits (head
-moved but tree didn't, e.g. a base merge), skip and report "no new commits".
-This scoping is the only behavioral difference from a NEW review.
+**NEW and UPDATED both review the whole PR.** There is no incremental scope: an
+UPDATED PR (new commits since the last review) is re-reviewed end to end,
+exactly like a NEW one. Repetition is prevented downstream, not by narrowing the
+review — the 4c `threads` dedup skips any inline comment already on the PR or
+one a human resolved, so a full re-review raises only genuinely new findings
+while staying quiet on ones already on the PR.
 
-**Re-evaluate a carried-forward finding against the surface that would resolve
-it, not the commit diff.** A _code_ finding is closed by a change in the compare
-range (the diff scope above covers it). But a **PR-metadata / process finding —
-a misleading title, a missing or wrong description, an undisclosed sensitive
-change (the CLAUDE.md "call it out in the PR description" gate), a missing
-`security-review` note, labels** — is closed by editing the PR's title/body/
-labels, and **a description edit is not a commit, so it never appears in the
-compare diff.** A commit-diff-scoped re-review is structurally blind to it.
-Whenever a prior finding was about the title/description/disclosure, re-read the
-live metadata before carrying it forward:
+**Judge metadata findings against the live PR, never the title alone.** A
+finding about the PR's title/description/disclosure — a misleading title, a
+missing or wrong description, an undisclosed sensitive change (the CLAUDE.md
+"call it out in the PR description" gate), a missing `security-review` note,
+labels — is resolved by editing the PR's title/body/labels, so judge it against
+what the PR actually says now. Read the live metadata:
 
 ```bash
 gh pr view {number} -R {owner}/{repo} --json title,body,labels
 ```
 
-If the body now discloses what the finding flagged, the finding is **resolved**
-— drop it and recompute the verdict. Never hold a do-not-approve on a disclosure
-or title gap the author has since closed in the body. The same rule governs a
-fresh review: judge a disclosure finding against the **actual PR body you
-fetched**, never inferred from a `docs:`-style title alone.
+If the body already discloses what such a finding would flag, do not raise it,
+and never hold a do-not-approve on a disclosure or title gap the body already
+closes. Judge a disclosure finding against the **actual PR body you fetched**,
+never inferred from a `docs:`-style title alone.
 
 **Classify the sensitive surface while you have the changed-file list.** Using
 the catalog in 4c, record which surfaces (auth/authz, money movement,
@@ -396,26 +388,26 @@ Then write the summary + verdict as one issue comment. This body and the inline
 comments go to GitHub, so keep them em-dash-free (colons, commas, parens) per
 the repo's user-facing-prose convention.
 
-**Upsert it — one summary per PR, always current.** Write the raw markdown body
-(template below) to a file and hand it to `upsert`; it PATCHes the bot's
-existing marker-carrying comment in place if one exists, else POSTs a new one.
-So an UPDATED re-review refreshes the single summary (new verdict, new head
-marker) instead of stacking a fresh comment each tick:
+**Post it fresh — a new summary comment on every review.** Write the raw
+markdown body (template below) to a file and hand it to `summary`; it always
+POSTs a new comment. So each review (NEW, or an UPDATED re-review) leaves its
+own summary on the PR — a running history of verdicts rather than a single
+overwritten one:
 
 ```bash
-bash <skill-dir>/pr-actions.sh upsert {number} /tmp/bot-panel-review-loop-{number}-summary.md
+bash <skill-dir>/pr-actions.sh summary {number} /tmp/bot-panel-review-loop-{number}-summary.md
 ```
 
 Summary body — keep the **visible** body to just the three things a reader
 actually scans: the verdict, the panel (models + fan-out count), and the head.
 Every findings list and the human-review note live in collapsed `<details>`
-accordions, so a reader expands only what they want. Always written (posted or
-upserted), even with zero inline findings. **Omit any findings accordion whose
-count is zero**; omit the human-review accordion only when no sensitive surface
-is touched. The blank line after each `<summary>` is required for GitHub to
-render the markdown inside. The `<!-- ... head= -->` marker is mandatory and
-must carry the current head — the Step 1 prefilter's engagement check depends on
-it.
+accordions, so a reader expands only what they want. Always posted, even with
+zero inline findings. **Omit any findings accordion whose count is zero**; omit
+the human-review accordion only when no sensitive surface is touched. The blank
+line after each `<summary>` is required for GitHub to render the markdown
+inside. The `<!-- ... head= -->` marker is mandatory and must carry the current
+head — the Step 1 prefilter's engagement check reads the most recent marker, so
+it keeps working across the stacked summaries.
 
 ```
 ## Panel review (advisory)
