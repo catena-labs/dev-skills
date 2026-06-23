@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
     --repo)  REPO="${2:-}"; shift 2 ;;
     --start) START="${2:-}"; shift 2 ;;
     --side)  SIDE="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "pr-actions.sh: unknown flag: $1" >&2; exit 2 ;;
     *) args+=("$1"); shift ;;
   esac
@@ -150,9 +150,11 @@ case "$verb" in
     out="$(printf '%s' "$payload" | gh api "repos/$REPO/pulls/$num/comments" --method POST --input - 2>&1)"
     if [[ $? -eq 0 ]]; then
       echo "posted"
-    elif printf '%s' "$out" | grep -qiE '422|must be part of'; then
-      echo "offdiff"   # off-diff line: agent folds this finding into the summary body
+    elif printf '%s' "$out" | grep -qi 'must be part of'; then
+      echo "offdiff"   # line not in the diff: agent folds this finding into the summary body
     else
+      # Any other failure (incl. a 422 from an inverted/oversized range or a stale
+      # commit_id) is a real error, not an off-diff line — surface it, don't demote.
       echo "pr-actions.sh: comment POST failed on #$num: $out" >&2; exit 1
     fi
     ;;
