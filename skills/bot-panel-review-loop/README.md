@@ -33,6 +33,11 @@ loop indefinitely.
 
 - `--exclude-own` — skip PRs you authored (default: include them).
 - `--dependabot` — include Dependabot PRs (default: skip them).
+- `--deep` — force the deep **Tier 2 decomposition** review (split each PR into
+  scoped chunks + a seam reviewer + the whole-PR panel, then synthesize and
+  verify) on _every_ PR instead of only large ones. Much more expensive per PR
+  and runs the sweep sequentially — a "deep-review the whole board" mode, not
+  the everyday default.
 
 Already-approved PRs are reviewed by default (the engagement marker still keeps
 it from re-reviewing one at the same head).

@@ -26,8 +26,11 @@
 # PENDING_VERDICT row with the returned verdict.
 #
 # Flags mirror the skill: --exclude-own, --dependabot (include dependabot).
-# Targets bash 3.2 (macOS system bash). Human-approved PRs are reviewed like any
-# other (the engagement marker still skips one already reviewed at this head).
+# --deep is accepted but ignored here — it sets review *depth* in Step 4 (force
+# Tier 2 decomposition), not which PRs are selected, so the prefilter takes no
+# action on it (accepting it just keeps the skill's blanket flag pass-through
+# safe). Targets bash 3.2 (macOS system bash). Human-approved PRs are reviewed
+# like any other (the engagement marker still skips one already reviewed at this head).
 set -uo pipefail
 
 EXCLUDE_OWN=0
@@ -36,6 +39,7 @@ for arg in "$@"; do
   case "$arg" in
     --exclude-own) EXCLUDE_OWN=1 ;;
     --dependabot) INCLUDE_DEPENDABOT=1 ;;
+    --deep) ;;  # depth flag, consumed by Step 4; not a selection gate
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done

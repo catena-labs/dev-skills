@@ -17,7 +17,7 @@ description:
   commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
 allowed-tools:
   Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
-argument-hint: "[--exclude-own] [--dependabot]"
+argument-hint: "[--exclude-own] [--dependabot] [--deep]"
 ---
 
 # Bot Panel Review Loop
@@ -53,6 +53,9 @@ to be driven by `/loop`, so each tick is one fleet-wide sweep:
 
 # Flags pass straight through (see "Flags" below).
 /loop /bot-panel-review-loop --exclude-own --dependabot
+
+# Deep sweep: force Tier 2 decomposition on every PR (expensive, runs sequentially).
+/bot-panel-review-loop --deep
 ```
 
 Per-PR engagement markers keep it from re-reviewing a PR it already covered at
@@ -62,6 +65,12 @@ the same head.
 
 - `--exclude-own` — skip PRs you authored (default: include them).
 - `--dependabot` — include Dependabot PRs (default: skip them).
+- `--deep` — force the **Tier 2 decomposition** review (chunks + seam + whole-PR
+  panel + verification; see Step 4) on _every_ actionable PR, instead of
+  size-gating it to large PRs. Sets review depth, not selection. Expensive — it
+  roughly triples-to-quintuples the agents per PR and makes the whole sweep
+  decomposition-heavy, so run it sequentially (see Step 4's concurrency note).
+  Use it to deep-review a board, not as the everyday default.
 
 Already-approved PRs are reviewed by default; there is no flag to skip them (the
 engagement marker already prevents re-reviewing one at the same head).
@@ -142,7 +151,10 @@ dir pinned to the PR head. Those linked worktrees share this repo's single
 `.git`, so fanning out every PR at once means (PRs x panelists) concurrent
 `git worktree add`/`remove` racing on `.git/worktrees` and index/config locks.
 Dispatch in small batches (or sequentially if a batch errors on a git lock) —
-fresh-context-per-PR is the goal, not maximum parallelism.
+fresh-context-per-PR is the goal, not maximum parallelism. **Under `--deep`,
+every PR is a Tier 2 decomposition, so the whole sweep is heavy: dispatch PRs
+one at a time** (the per-tick concurrency drop the Tier 2 section calls for now
+applies to every PR, so there is no parallelism left to spend).
 
 The skill never checks out a PR into your working tree; the diff arrives over
 the GitHub API via `gh`, so nothing here scales with PR size. The review path
@@ -155,7 +167,9 @@ Give each agent the brief below, filling `{owner}/{repo}` and the entry's
 `number` and `head` from `ACTIONABLE_JSON`. NEW and UPDATED entries get the same
 review — the whole PR (the engagement label only distinguishes them in the
 report). If the entry carries a `note` (e.g. no CI checks), pass it along so the
-agent can mention it.
+agent can mention it. **If the sweep was invoked with `--deep`, tell the agent
+to use Tier 2 (decomposition) regardless of the entry's `size`** (see the
+escalation tier in 4a).
 
 ### 4a. Re-confirm actionable, react 👀, gather findings, classify surfaces
 
@@ -216,7 +230,9 @@ single panelist is a thinner signal than a true multi-model panel).
 
 **Escalation tier — how deep to review this PR.** Choose from the entry's `size`
 (prefilter) and the sensitive surfaces you classify below. Depth scales with a
-PR's risk, never with the number of open PRs:
+PR's risk, never with the number of open PRs. **Override: if the sweep was
+invoked with `--deep`, use Tier 2 for every PR regardless of `size` or surface**
+— the operator has opted the whole board into decomposition.
 
 - **Tier 0 — `size: "small"` and no sensitive surface.** One panel fan-out, as
   above. The common case.
@@ -230,12 +246,16 @@ PR's risk, never with the number of open PRs:
   clean verdict on auth or money carry confidence. If your runtime allows
   nesting, a separate skeptic subagent per finding is stronger than an inline
   re-read; either satisfies the tier.
-- **Tier 2 — `size: "large"`, or large AND sensitive.** Do not skim the whole
-  diff twice. **Decompose** instead. As the per-PR orchestrator, group the
-  changed-file list into <= 4 coherent chunks — semantic grouping by what the
-  code does, but force each sensitive surface (auth/authz, money, schema,
-  secrets) into its own chunk so the deepest read sits on the riskiest code
-  (group the long tail into a "rest" chunk). Then fan out, all gather-only:
+- **Tier 2 — `size: "large"`, large AND sensitive, or any PR when `--deep` is
+  set.** Do not skim the whole diff twice. **Decompose** instead. As the per-PR
+  orchestrator, group the changed-file list into <= 4 coherent chunks — semantic
+  grouping by what the code does, but force each sensitive surface (auth/authz,
+  money, schema, secrets) into its own chunk so the deepest read sits on the
+  riskiest code (group the long tail into a "rest" chunk). On a small PR forced
+  here by `--deep`, the file list may only support one or two real chunks —
+  group into as many coherent chunks as the diff actually has and don't
+  manufacture empty ones; the seam reviewer and the whole-PR panel still run, so
+  even a tiny PR gets a deeper read than Tier 0. Then fan out, all gather-only:
   - **one scoped deep-dive reviewer per chunk** — a direct
     `gh pr diff -- <paths>` read (single strong model, no worktree) that reads
     the full diff for context but raises findings only on its assigned paths;
@@ -257,9 +277,10 @@ PR's risk, never with the number of open PRs:
   the parallelism. See `DESIGN-phase2-decomposition.md` for the full mechanism.
 
 State the chosen tier and why in both your sweep return line and the summary's
-**Panel** line (e.g. `tier 2: 102 files; 4 chunks + seam + panel`), so the
-escalation is always visible and never silent. Cost guards: cap chunks at 4, run
-the whole-PR panel once (never twice), and at most one verify pass per
+**Panel** line (e.g. `tier 2: 102 files; 4 chunks + seam + panel`, or
+`tier 2 (--deep): 3 files; 2 chunks + seam + panel` when the flag forced it), so
+the escalation is always visible and never silent. Cost guards: cap chunks at 4,
+run the whole-PR panel once (never twice), and at most one verify pass per
 _distinct_ surviving HIGH/CRITICAL. While decomposing a PR, drop the outer sweep
 concurrency for that tick — decomposition is the heavy job, so do not also run
 other PRs' panels against the same `.git`.
