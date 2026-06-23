@@ -33,11 +33,11 @@ loop indefinitely.
 
 - `--exclude-own` — skip PRs you authored (default: include them).
 - `--dependabot` — include Dependabot PRs (default: skip them).
-- `--deep` — force the deep **Tier 2 decomposition** review (split each PR into
-  scoped chunks + a seam reviewer + the whole-PR panel, then synthesize and
-  verify) on _every_ PR instead of only large ones. Much more expensive per PR
-  and runs the sweep sequentially — a "deep-review the whole board" mode, not
-  the everyday default.
+
+Every PR is reviewed at the same depth — there is no depth flag. Each review
+runs `panel-review` with the `decompose` panelist included, which splits the
+diff into scoped chunks plus a seam pass and folds the result into the panel. It
+self-scales with diff size, so small PRs stay cheap.
 
 Already-approved PRs are reviewed by default (the engagement marker still keeps
 it from re-reviewing one at the same head).
@@ -50,7 +50,7 @@ npx skills add catena-labs/dev-skills --skill bot-panel-review-loop
 
 Each per-PR agent runs a gather-only
 [`panel-review`](https://github.com/catena-labs/dev-skills/tree/main/skills/panel-review)
-(a single fan-out, read-only), so install it too:
+(read-only, with the `decompose` panelist included), so install it too:
 
 ```
 npx skills add catena-labs/dev-skills --skill panel-review
@@ -68,19 +68,20 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   NEW or UPDATED since the last review, has no merge conflicts, and has green
   CI.
 - **Dispatches one fresh agent per PR.** Each agent reacts 👀, runs a
-  gather-only panel review of that PR's diff, and posts back. A second bundled
-  script, `pr-actions.sh`, carries the per-PR GitHub plumbing (re-confirm live
-  state, react, fetch existing threads, post comments, post the summary, settle
-  the reaction), so the agent never hand-assembles `gh`/`graphql` or escapes
-  comment JSON itself.
+  gather-only panel review of that PR's diff (the panel includes the `decompose`
+  panelist, which reviews the diff in scoped chunks plus a seam pass for depth),
+  and posts back. A second bundled script, `pr-actions.sh`, carries the per-PR
+  GitHub plumbing (re-confirm live state, react, fetch existing threads, post
+  comments, post the summary, settle the reaction), so the agent never
+  hand-assembles `gh`/`graphql` or escapes comment JSON itself.
 - **Posts inline fix suggestions** at the correct file + line, with one-click
   ` ```suggestion ` blocks where the fix is concrete.
 - **Posts a concise approve / do-not-approve summary** per PR. The visible body
-  is just the verdict, the panel (models that ran), and the round count;
-  everything else — the findings lists and a human-review note for sensitive
-  surfaces (auth, money movement, schema, secrets) — folds into collapsible
-  `<details>` sections. It then swaps its 👀 reaction to 🚀 on an approve
-  verdict (leaving 👀 when it left comments).
+  is just the verdict, the panel (which panelists ran), and the head; everything
+  else — the findings lists and a human-review note for sensitive surfaces
+  (auth, money movement, schema, secrets) — folds into collapsible `<details>`
+  sections. It then swaps its 👀 reaction to 🚀 on an approve verdict (leaving
+  👀 when it left comments).
 - **Tracks engagement (NEW / UPDATED / SEEN)** via a marker comment, so it
   re-reviews the whole PR only when it has new commits and never re-posts an
   inline finding already on the PR. Each review still leaves a fresh summary
@@ -101,9 +102,10 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   prior marker (and the legacy `panel-review-prs` marker, for repos reviewed
   before the rename) so a re-sweep skips unchanged PRs. Don't delete those
   marker comments unless you want a PR re-reviewed.
-- **Each actionable PR costs a full fan-out.** A per-PR agent runs
-  `panel-review` (multiple CLI agents, minutes of wall clock). Concurrency is
-  bounded to a few PRs at a time; a busy repo sweep still takes a while.
+- **Each actionable PR costs a full fan-out plus decompose.** A per-PR agent
+  runs `panel-review` (multiple CLI agents, minutes of wall clock) with the
+  `decompose` panelist adding scoped chunk reads. Concurrency is bounded to a
+  few PRs at a time; a busy repo sweep still takes a while.
 - **A thin panel is possible.** `panel-review` uses whichever of `codex`,
   `claude`, and `opencode` are on `PATH`; a missing CLI silently shrinks the
   panel, and the summary's **Panel** line flags it.

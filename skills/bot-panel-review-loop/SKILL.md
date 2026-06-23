@@ -17,7 +17,7 @@ description:
   commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
 allowed-tools:
   Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
-argument-hint: "[--exclude-own] [--dependabot] [--deep]"
+argument-hint: "[--exclude-own] [--dependabot]"
 ---
 
 # Bot Panel Review Loop
@@ -53,9 +53,6 @@ to be driven by `/loop`, so each tick is one fleet-wide sweep:
 
 # Flags pass straight through (see "Flags" below).
 /loop /bot-panel-review-loop --exclude-own --dependabot
-
-# Deep sweep: force Tier 2 decomposition on every PR (expensive, runs sequentially).
-/bot-panel-review-loop --deep
 ```
 
 Per-PR engagement markers keep it from re-reviewing a PR it already covered at
@@ -65,15 +62,12 @@ the same head.
 
 - `--exclude-own` — skip PRs you authored (default: include them).
 - `--dependabot` — include Dependabot PRs (default: skip them).
-- `--deep` — force the **Tier 2 decomposition** review (chunks + seam + whole-PR
-  panel + verification; see Step 4) on _every_ actionable PR, instead of
-  size-gating it to large PRs. Sets review depth, not selection. Expensive — it
-  roughly triples-to-quintuples the agents per PR and makes the whole sweep
-  decomposition-heavy, so run it sequentially (see Step 4's concurrency note).
-  Use it to deep-review a board, not as the everyday default.
 
 Already-approved PRs are reviewed by default; there is no flag to skip them (the
 engagement marker already prevents re-reviewing one at the same head).
+
+Every review runs the panel with the `decompose` panelist on (see Step 4) —
+depth is built into each review, not a flag you pass.
 
 ## Selection gates (a PR is reviewed only if ALL hold)
 
@@ -115,14 +109,12 @@ Pass through whatever flags the invocation received. The script prints two
 sentinel-delimited sections:
 
 - `===ACTIONABLE_JSON===` — a JSON array of the PRs that survived every gate,
-  each
-  `{number, title, head, engagement, ci, note, additions, deletions, changedFiles, size}`.
-  `engagement` is `NEW` or `UPDATED` (UPDATED = there are new commits since the
-  last review); `note` flags a PR with no CI checks.
-  `additions`/`deletions`/`changedFiles` are the total diff size vs base, and
-  `size` is `"small"` or `"large"` (the prefilter's thresholds, currently 20
-  changed files or 1000 additions); `size` drives the **Step 4 escalation
-  tier**. **This is the dispatch list for Step 4** — one agent per entry.
+  each `{number, title, head, engagement, ci, note}`. `engagement` is `NEW` or
+  `UPDATED` (UPDATED = there are new commits since the last review); `note`
+  flags a PR with no CI checks. **This is the dispatch list for Step 4** — one
+  agent per entry. (Review depth no longer varies by PR size — every review runs
+  the same panel including the `decompose` panelist, which self-scales — so the
+  prefilter carries no size/tier fields.)
 - `===REPORT_TABLE===` — a prebuilt markdown table, one row per open PR
   (unlabeled drafts are dropped entirely, so they never appear). Every
   skipped/deferred row already carries its reason; each actionable row carries
@@ -151,10 +143,10 @@ dir pinned to the PR head. Those linked worktrees share this repo's single
 `.git`, so fanning out every PR at once means (PRs x panelists) concurrent
 `git worktree add`/`remove` racing on `.git/worktrees` and index/config locks.
 Dispatch in small batches (or sequentially if a batch errors on a git lock) —
-fresh-context-per-PR is the goal, not maximum parallelism. **Under `--deep`,
-every PR is a Tier 2 decomposition, so the whole sweep is heavy: dispatch PRs
-one at a time** (the per-tick concurrency drop the Tier 2 section calls for now
-applies to every PR, so there is no parallelism left to spend).
+fresh-context-per-PR is the goal, not maximum parallelism. Each review also runs
+the `decompose` panelist (Step 4a), but its chunk reads are worktree-free
+(direct `gh pr diff` reads), so they add subagents per PR without adding to the
+`.git`-worktree contention that sets this bound.
 
 The skill never checks out a PR into your working tree; the diff arrives over
 the GitHub API via `gh`, so nothing here scales with PR size. The review path
@@ -167,9 +159,7 @@ Give each agent the brief below, filling `{owner}/{repo}` and the entry's
 `number` and `head` from `ACTIONABLE_JSON`. NEW and UPDATED entries get the same
 review — the whole PR (the engagement label only distinguishes them in the
 report). If the entry carries a `note` (e.g. no CI checks), pass it along so the
-agent can mention it. **If the sweep was invoked with `--deep`, tell the agent
-to use Tier 2 (decomposition) regardless of the entry's `size`** (see the
-escalation tier in 4a).
+agent can mention it.
 
 ### 4a. Re-confirm actionable, react 👀, gather findings, classify surfaces
 
@@ -202,88 +192,49 @@ bash <skill-dir>/pr-actions.sh react {number}    # adds 👀
 ```
 
 Then invoke the **`panel-review`** skill via the Skill tool, targeting the PR
-(`/panel-review --pr {number}`), with one overriding instruction:
+(`/panel-review --pr {number}`), with two overriding instructions:
 
 > **Gather-only. Do NOT modify the working tree; do not edit, commit, or push.**
+>
+> **Include the `decompose` orchestrated panelist** (panel-review's
+> `reviewers/decompose.md`) alongside the CLI panel.
 
 A `--pr` panel review is a single gather-and-synthesize pass and is read-only by
 design (its panelists run worktree-isolated with GitHub-write forbidden), so
 each invocation is exactly one fan-out — there is no fix/re-review loop to
 suppress and never a `--uncommitted` switch (there are no working-tree fixes).
-Every tier runs the whole-PR panel itself exactly once; Tier 2 (below)
-decomposes the PR into scoped sub-reviews around that single fan-out rather than
-running it twice. You apply the FIX/FOREGO judgment to its synthesis yourself
-(ledger below).
+The `decompose` panelist is what gives the review depth: panel-review chunks the
+diff into scoped sub-reviews plus a cross-boundary seam pass and folds the
+result into its synthesis as one more voice. bot no longer orchestrates that
+itself — depth lives in panel-review now, the same on every PR and self-scaling
+with diff size. You apply the FIX/FOREGO judgment to panel-review's synthesis
+yourself (ledger below).
 
-**Record the panel composition and fan-out count.** `panel-review` emits one
-`panel-review: <name> (<model>) done (exit N)` heartbeat per panelist; collect
-the `<name> (<model>)` pairs that actually ran (it auto-detects codex, claude,
-opencode on `PATH`, so a missing CLI silently shrinks the panel). A `--pr` panel
-review is internally **1 round** — one gather-and-synthesize pass, no
-fix/re-review loop — so review depth here does **not** scale with rounds. It
-scales with panel breadth (how many models ran) and, for large PRs, with
-**decomposition** — Tier 2 adds scoped per-area deep-dive reviewers and a seam
-reviewer around the single whole-PR fan-out (the escalation tier below; full
-mechanism in `DESIGN-phase2-decomposition.md`). Record the tier and, for Tier 2,
-the chunk and reviewer count. If only one panelist ran, say so in the summary (a
-single panelist is a thinner signal than a true multi-model panel).
+**Record the panel composition.** `panel-review` emits one
+`panel-review: <name> (<model>) done (exit N)` heartbeat per CLI panelist;
+collect the `<name> (<model>)` pairs that actually ran. Don't assume a fixed
+roster — `panel-review` auto-detects whichever supported CLIs are on `PATH`, so
+a missing one silently shrinks the panel; record what the heartbeats report, not
+a hardcoded list. The `decompose` panelist runs too — it shows up in the
+synthesis as a `Flagged by: decompose` voice, not a CLI heartbeat. Depth scales
+with panel breadth (how many models ran) plus decompose's per-area reads, never
+with rounds (a `--pr` review is one pass). If only one CLI panelist ran, say so
+in the summary — one model plus decompose is a thinner signal than a true
+multi-model panel.
 
-**Escalation tier — how deep to review this PR.** Choose from the entry's `size`
-(prefilter) and the sensitive surfaces you classify below. Depth scales with a
-PR's risk, never with the number of open PRs. **Override: if the sweep was
-invoked with `--deep`, use Tier 2 for every PR regardless of `size` or surface**
-— the operator has opted the whole board into decomposition.
-
-- **Tier 0 — `size: "small"` and no sensitive surface.** One panel fan-out, as
-  above. The common case.
-- **Tier 1 — any sensitive surface touched (auth/authz, money movement,
-  schema/migration, secrets/external), any size.** One fan-out, plus: before any
-  HIGH or CRITICAL finding is allowed to stand in a do-not-approve verdict, do a
-  focused adversarial re-read of that finding whose only goal is to _refute_ it
-  (open the cited code, decide real vs false-positive); keep it only if it
-  survives. This is the calibration rule ("verify single-panelist HIGH before
-  recommending") made mandatory on sensitive code, and it is exactly what lets a
-  clean verdict on auth or money carry confidence. If your runtime allows
-  nesting, a separate skeptic subagent per finding is stronger than an inline
-  re-read; either satisfies the tier.
-- **Tier 2 — `size: "large"`, large AND sensitive, or any PR when `--deep` is
-  set.** Do not skim the whole diff twice. **Decompose** instead. As the per-PR
-  orchestrator, group the changed-file list into <= 4 coherent chunks — semantic
-  grouping by what the code does, but force each sensitive surface (auth/authz,
-  money, schema, secrets) into its own chunk so the deepest read sits on the
-  riskiest code (group the long tail into a "rest" chunk). On a small PR forced
-  here by `--deep`, the file list may only support one or two real chunks —
-  group into as many coherent chunks as the diff actually has and don't
-  manufacture empty ones; the seam reviewer and the whole-PR panel still run, so
-  even a tiny PR gets a deeper read than Tier 0. Then fan out, all gather-only:
-  - **one scoped deep-dive reviewer per chunk** — a direct
-    `gh pr diff -- <paths>` read (single strong model, no worktree) that reads
-    the full diff for context but raises findings only on its assigned paths;
-  - **one seam reviewer** — reads the full diff but raises findings only on
-    changed cross-boundary interfaces (exported signatures, shared types,
-    migration-vs-repo column drift, API request/response shapes), the bugs
-    chunk-local reviewers structurally miss;
-  - **the whole-PR multi-model panel exactly once** (the Tier-0 fan-out, the
-    original codex+claude+... over the full diff) for breadth and cross-cutting
-    coherence — not a second time.
-
-  Then synthesize: union every chunk, seam, and panel ledger, dedupe by issue
-  (match on the bold `[SEV]` headline, not the line), apply the FIX/FOREGO
-  calibration, and run the Tier-1 adversarial refute pass on the surviving
-  HIGH/CRITICAL set. Chunk and seam reviewers **return** their ledgers and never
-  touch GitHub — you, the synthesizer, are the only actor that posts. If your
-  runtime cannot spawn the reviewers as subagents, do the scoped per-chunk reads
-  inline (sequentially) and synthesize — the depth comes from the scoping, not
-  the parallelism. See `DESIGN-phase2-decomposition.md` for the full mechanism.
-
-State the chosen tier and why in both your sweep return line and the summary's
-**Panel** line (e.g. `tier 2: 102 files; 4 chunks + seam + panel`, or
-`tier 2 (--deep): 3 files; 2 chunks + seam + panel` when the flag forced it), so
-the escalation is always visible and never silent. Cost guards: cap chunks at 4,
-run the whole-PR panel once (never twice), and at most one verify pass per
-_distinct_ surviving HIGH/CRITICAL. While decomposing a PR, drop the outer sweep
-concurrency for that tick — decomposition is the heavy job, so do not also run
-other PRs' panels against the same `.git`.
+**Verify before you stand on a finding.** Review depth comes from the panel
+itself now — multiple models plus the `decompose` panelist — so there is no
+per-PR tier to choose and no decomposition to orchestrate by hand. What stays
+yours, as the per-PR judge: before any HIGH or CRITICAL finding is allowed to
+stand in a do-not-approve verdict, do a focused adversarial re-read of it whose
+only goal is to _refute_ it (open the cited code, decide real vs
+false-positive); keep it only if it survives. This is **mandatory on sensitive
+surfaces** (auth, money, schema/migration, secrets) — it is what lets a clean
+verdict on auth or money carry confidence — and is the calibration rule ("verify
+single-panelist HIGH before recommending") applied everywhere else. If your
+runtime allows nesting, a separate skeptic subagent per finding is stronger than
+an inline re-read. At most one refute pass per _distinct_ surviving
+HIGH/CRITICAL.
 
 The per-finding ledger: severity, `file:line`, the issue, the recommended fix,
 and the **FIX**/**FOREGO** verdict (with forego reason). Calibration:
@@ -422,7 +373,7 @@ bash <skill-dir>/pr-actions.sh summary {number} /tmp/bot-panel-review-loop-{numb
 ```
 
 Summary body — keep the **visible** body to just the three things a reader
-actually scans: the verdict, the panel (models + fan-out count), and the head.
+actually scans: the verdict, the panel (which panelists ran), and the head.
 Every findings list and the human-review note live in collapsed `<details>`
 accordions, so a reader expands only what they want. Always posted, even with
 zero inline findings. **Omit any findings accordion whose count is zero**; omit
@@ -437,7 +388,7 @@ it keeps working across the stacked summaries.
 
 **Verdict: <Approve | Do not approve yet>.** <one-line reason>
 
-**Panel:** {name (model), name (model), ...} ({tier shape: "1 fan-out" for Tier 0/1, or "tier 2: 4 chunks + seam + panel"}, at {short head}; gather-only, no code was changed). <only-if-thin: note any supported CLI not on PATH, e.g. "codex and opencode were not detected, so consensus is single-panelist.">
+**Panel:** {name (model), name (model), ..., decompose}, at {short head}; gather-only, no code was changed. <only-if-thin: note that fewer panelists ran than expected, e.g. "only one CLI panelist was detected on PATH, so consensus is single-panelist (plus decompose).">
 
 <details>
 <summary><b>Recommend fixing ({count})</b></summary>
@@ -470,12 +421,11 @@ it keeps working across the stacked summaries.
 <!-- bot-panel-review-loop: head={headRefOid} -->
 ```
 
-The **Panel** line is mandatory: list every panelist that ran as `name (model)`
-plus the tier and its shape (one fan-out for Tier 0/1; for a Tier-2 review write
-the decomposition, e.g. "4 chunks + seam + panel"), so the summary is
-self-describing about the panel's breadth and the escalation tier (and flags a
-thin single-CLI run). Everything else is collapsed by design — do not promote a
-findings list or the human-review note into the visible body.
+The **Panel** line is mandatory: list every panelist that ran — each CLI as
+`name (model)` plus `decompose` — so the summary is self-describing about the
+panel's breadth and flags a thin single-CLI run. Everything else is collapsed by
+design — do not promote a findings list or the human-review note into the
+visible body.
 
 **Verdict rule:** **Do not approve yet** if any FIX finding is CRITICAL/HIGH or
 a substantiated wrong-approach flag survives; **Approve** if only MEDIUM/LOW
@@ -522,7 +472,7 @@ worth addressing. Reactions dedupe per actor+content, so the swap is idempotent
 on an UPDATED re-review.
 
 Return to the sweep:
-`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+...; tier T, F fan-out(s)] [human-review: {surfaces or none}]`.
+`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+...+decompose] [human-review: {surfaces or none}]`.
 The trailing tags let the sweep show panel breadth and the human-review flag
 without re-reading each PR.
 
@@ -532,16 +482,16 @@ The prefilter already emitted `REPORT_TABLE` — one row per open PR (unlabeled
 drafts excluded) with every skip/defer reason filled in. Take it verbatim and,
 for each `PENDING_VERDICT` row, replace the last three columns with what that
 PR's agent returned: the **Result** (verdict + finding counts), the **Panel**
-(models that ran + tier and fan-out count), and the **Human** column
-(human-review surfaces, or blank). Skip and defer rows are already final.
+(which panelists ran), and the **Human** column (human-review surfaces, or
+blank). Skip and defer rows are already final.
 
-| PR   | Title           | Engagement | Result                          | Panel                                | Human |
-| ---- | --------------- | ---------- | ------------------------------- | ------------------------------------ | ----- |
-| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | codex+claude; t1, 1 fan-out          | auth  |
-| #905 | fee preview     | UPDATED    | approve (clean)                 | claude; t1, 1 fan-out (codex/oc n/a) | money |
-| #906 | bump deps       | -          | dependabot → skipped            | -                                    | -     |
-| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -                                    | -     |
-| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -                                    | -     |
+| PR   | Title           | Engagement | Result                          | Panel                           | Human |
+| ---- | --------------- | ---------- | ------------------------------- | ------------------------------- | ----- |
+| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | codex+claude+decompose          | auth  |
+| #905 | fee preview     | UPDATED    | approve (clean)                 | claude+decompose (codex/oc n/a) | money |
+| #906 | bump deps       | -          | dependabot → skipped            | -                               | -     |
+| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -                               | -     |
+| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -                               | -     |
 
 Keep it to signal — detailed findings live on each PR. The Panel column says at
 a glance whether a review was a full multi-model panel or a thinner single-CLI

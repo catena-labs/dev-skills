@@ -12,8 +12,7 @@
 # Output (stdout), two sections delimited by sentinel lines:
 #
 #   ===ACTIONABLE_JSON===
-#   [ {"number","title","head","engagement","ci","note",
-#      "additions","deletions","changedFiles","size"}, ... ]
+#   [ {"number","title","head","engagement","ci","note"}, ... ]
 #   ===REPORT_TABLE===
 #   | PR | Title | Engagement | Result | Panel | Human |
 #   | ... one row per open PR (unlabeled drafts dropped); actionable rows carry PENDING_VERDICT ... |
@@ -26,11 +25,8 @@
 # PENDING_VERDICT row with the returned verdict.
 #
 # Flags mirror the skill: --exclude-own, --dependabot (include dependabot).
-# --deep is accepted but ignored here — it sets review *depth* in Step 4 (force
-# Tier 2 decomposition), not which PRs are selected, so the prefilter takes no
-# action on it (accepting it just keeps the skill's blanket flag pass-through
-# safe). Targets bash 3.2 (macOS system bash). Human-approved PRs are reviewed
-# like any other (the engagement marker still skips one already reviewed at this head).
+# Targets bash 3.2 (macOS system bash). Human-approved PRs are reviewed like any
+# other (the engagement marker still skips one already reviewed at this head).
 set -uo pipefail
 
 EXCLUDE_OWN=0
@@ -39,7 +35,6 @@ for arg in "$@"; do
   case "$arg" in
     --exclude-own) EXCLUDE_OWN=1 ;;
     --dependabot) INCLUDE_DEPENDABOT=1 ;;
-    --deep) ;;  # depth flag, consumed by Step 4; not a selection gate
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -48,7 +43,7 @@ repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "failed to
 me=$(gh api user -q .login) || { echo "failed to resolve login" >&2; exit 1; }
 
 prs=$(gh pr list --state open --limit 100 \
-  --json number,title,headRefOid,isDraft,mergeable,author,labels,additions,deletions,changedFiles) \
+  --json number,title,headRefOid,isDraft,mergeable,author,labels) \
   || { echo "failed to list PRs" >&2; exit 1; }
 
 actionable_file=$(mktemp)
@@ -68,26 +63,12 @@ emit_row() { # number title engagement result
   printf '| #%s | %s | %s | %s | - | - |\n' "$1" "$2" "$3" "$4" >> "$report_file"
 }
 
-# Size thresholds for the Step 4 escalation tier. A PR is "large" when it crosses
-# either bound; large PRs get a deeper review (Tier 2: decompose into per-area
-# scoped reviews plus per-HIGH verification) per the SKILL.md Step 4 escalation
-# policy. Tunable.
-LARGE_CHANGED_FILES=20
-LARGE_ADDITIONS=1000
-
-push_actionable() { # number title head engagement ci note adds dels files
-  local adds=${7:-0} dels=${8:-0} files=${9:-0} size="small"
-  if [ "$files" -ge "$LARGE_CHANGED_FILES" ] || [ "$adds" -ge "$LARGE_ADDITIONS" ]; then
-    size="large"
-  fi
+push_actionable() { # number title head engagement ci note
   jq -nc \
     --argjson number "$1" --arg title "$2" --arg head "$3" \
     --arg engagement "$4" --arg ci "$5" --arg note "$6" \
-    --argjson adds "$adds" --argjson dels "$dels" --argjson files "$files" \
-    --arg size "$size" \
     '{number:$number, title:$title, head:$head, engagement:$engagement,
-      ci:$ci, note:(if $note=="" then null else $note end),
-      additions:$adds, deletions:$dels, changedFiles:$files, size:$size}' >> "$actionable_file"
+      ci:$ci, note:(if $note=="" then null else $note end)}' >> "$actionable_file"
 }
 
 # Pass 1: the gates expressible from the list payload alone. Emits one TSV row
@@ -147,12 +128,7 @@ while IFS=$'\t' read -r num head title disp draft; do
   fi
 
   [ "$draft" = "draft" ] && note="${note:+$note; }ready-for-review draft"
-  # Pull this candidate's diff size from the list payload (no extra API call) so
-  # Step 4 can pick an escalation tier. Candidates are few, so the per-PR jq is cheap.
-  read -r adds dels files < <(printf '%s' "$prs" | jq -r --argjson n "$num" \
-    '.[] | select(.number==$n) | "\(.additions) \(.deletions) \(.changedFiles)"')
-  push_actionable "$num" "$title" "$head" "$engagement" "$ci" "$note" \
-    "${adds:-0}" "${dels:-0}" "${files:-0}"
+  push_actionable "$num" "$title" "$head" "$engagement" "$ci" "$note"
   emit_row "$num" "$title" "$engagement" "PENDING_VERDICT"
 done < <(printf '%s' "$prs" | jq -r \
   --arg me "$me" \
