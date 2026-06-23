@@ -87,12 +87,6 @@ Each reviewer gets a unique id (e.g. `opencode-opencode-go-glm-5.2`) so two
 reviewers on the same backend keep separate worktrees, output files, and report
 sections.
 
-Add "deep" / "verify each finding" / "dig into the findings" to opt into deep
-mode: after the panelists finish, the coordinator spins off verification
-subagents for every finding, then synthesizes their evidence, concrete fixes,
-and fix rationale. Token-heavy — routine reviews should stick with the standard
-synthesis.
-
 ## What it does
 
 - Auto-detects whether the current branch has an open GitHub PR and switches to
@@ -123,8 +117,7 @@ synthesis.
   clock, so foreground calls block silently for minutes. Do not launch
   `panel-review.sh` via the `Agent` tool / subagents — there's no
   streaming-output API for in-flight subagents and the heartbeats become
-  invisible. Deep mode's post-processing verification subagents are the
-  exception, and only run after panelists finish.
+  invisible.
 - **Worktree mode is strictly less safe than the local-diff mode.** It gives
   panelists write/exec access in their worktree and shares your parent repo's
   `.git` objects, so a stray `git push` from a panelist would publish from your

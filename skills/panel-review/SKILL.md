@@ -4,18 +4,13 @@ description: >
   Run a parallel code review across multiple local CLI coding agents (codex,
   claude, opencode) and synthesize their findings. Use this skill whenever the
   user asks for a "panel review" / "panel-review", "second opinions on this
-  change", "multi-agent review", "ensemble review", a "deep panel review" /
-  "deep review" / "deep review the findings" / "dig deep into the findings" /
-  "verify each finding" (opt-in deep mode where the coordinator dispatches
-  verification subagents for every finding, then synthesizes their evidence,
-  concrete fixes, and fix rationale — see the "Deep mode" section in SKILL.md
-  for the procedure and output shape), asks to "have multiple agents/LLMs review
-  this", "cross-check this with codex/claude/etc", "fan out a code review", or
-  any similar phrasing asking for independent reviews from outside this
-  conversation. Each panelist runs in a fresh non-interactive subprocess with no
-  shared state — that is the point. Do NOT use when the user just wants the
-  current session to review code itself; use the regular code-reviewer agent for
-  that.
+  change", "multi-agent review", "ensemble review", asks to "have multiple
+  agents/LLMs review this", "cross-check this with codex/claude/etc", "fan out a
+  code review", or any similar phrasing asking for independent reviews from
+  outside this conversation. Each panelist runs in a fresh non-interactive
+  subprocess with no shared state — that is the point. Do NOT use when the user
+  just wants the current session to review code itself; use the regular
+  code-reviewer agent for that.
 ---
 
 # panel-review
@@ -179,14 +174,6 @@ When _not_ to use:
 8. **Synthesize the findings** in your reply to the user. The synthesized
    summary is the primary deliverable — most readers will not scroll up to the
    per-panelist sections, so put the substance here.
-
-   **If the user asked for a deep review** (see the **Deep mode** section after
-   step 10), dispatch the per-finding verification subagents and wait for their
-   results _before_ emitting the synthesis below. The section structure and
-   per-finding skeleton (`[SEVERITY] file:line — issue.` / `Fix: …` /
-   `Flagged by: …`) stay identical to standard mode; deep mode inserts two extra
-   lines (`Why:` and `Verified by:`) between `Fix:` and `Flagged by:` so a
-   reader's eye lands on the same anchor lines in both modes.
 
    **Always carry the panelist's self-reported model into the summary.** Each
    panelist starts its output with a `Model: <id>` line; the script also exposes
@@ -554,149 +541,6 @@ When _not_ to use:
     invent a line number to satisfy the format. The verification step in step 9
     is the _only_ license to rewrite a finding's substance — and only when you
     have actually checked the code.
-
-## Deep mode
-
-**Trigger.** User asked for a "deep panel review", "deep review", "deep review
-the findings", "dig deep into the findings", "verify each finding", "explain
-each finding", or similar. If the request just says "panel review" with no
-"deep" / "verify" / "dig in" qualifier, stay in standard mode.
-
-**Why opt-in.** Deep mode is token-expensive — every finding gets its own
-verification subagent, code read-through, and hand-written explanation. The
-standard synthesis from step 8 is the right default for routine reviews.
-
-**Note on the term.** "Deep" used to be a trigger for worktree-mode (panelists
-running tests, grepping callers). That mode is now automatic for committed
-targets and no longer needs a trigger. The phrase is repurposed: it now opts
-into the per-finding verification + explanation pass below. There is no
-script-side flag — `panel-review.sh` is unchanged; deep mode is purely a
-coordinator-side post-processing step.
-
-**Procedure.** After step 7 (panelists finished, sections streamed) and _before_
-emitting step 8's synthesis, enumerate every finding from every panelist —
-CRITICAL through LOW, consensus and unique alike. Apply the same verification
-pass to every `Approach (questionable):` flag too: verify the three evidence
-components against the code, draft the actual cross-layer fix (often a migration
-/ schema / API contract change, not a line edit), and explain how it resolves
-the symptom seen in the diff. If the user explicitly scoped the request ("deep
-review the auth findings", "verify only the criticals"), apply the scope;
-otherwise default to all findings _and_ all `Approach (questionable):` flags.
-
-1. **Create verification tasks.** Build one task per in-scope raw finding, plus
-   one task per in-scope `Approach (questionable):` flag. Preserve the original
-   panelist, model, severity, `file:line` (or named root-cause location for
-   Approach tasks), claim, and `Fix:` line. If two panelists raised the same
-   underlying issue, each raw finding still gets represented in a task; you may
-   include the duplicate context for the verifier, but do not skip a finding
-   without counting it as intentionally out of scope.
-
-2. **Spin off verification subagents.** Launch a dedicated subagent for each
-   task. If the harness caps concurrent subagents, queue them in small batches,
-   but every in-scope finding must receive a verifier before synthesis. The "Do
-   NOT launch the script via the Agent tool / subagent mechanism" rule in step 5
-   still applies only to `panel-review.sh`; deep-mode verification happens after
-   the script completes.
-
-   Give each verifier only the task-local context it needs:
-   - target type and PR URL / base / commit metadata;
-   - combined-output tempdir path and relevant worktree path if available;
-   - original panelist name + model;
-   - raw finding text, severity, cited `file:line`, and proposed fix;
-   - instruction to inspect code/diff and return evidence, not to implement
-     changes.
-
-   Use this output contract for every verifier:
-
-   ```md
-   Status: VERIFIED | FALSIFIED | CORRECTED | INCONCLUSIVE Evidence: concrete
-   files/lines read and what they show. Corrected finding: only when Status is
-   CORRECTED. Fix: concrete change anchored at file:line, with a short snippet
-   for non-trivial fixes. Why: one or two sentences naming the mechanism.
-   Confidence: high | medium | low
-   ```
-
-   The verifier's `Evidence`, `Fix`, and `Why` fields feed the synthesis's
-   `Verified by:`, `Fix:`, and `Why:` lines respectively — same labels, no
-   remapping.
-
-3. **Reconcile verifier results.** Treat `VERIFIED` and `CORRECTED` as eligible
-   for the synthesis. Use the corrected version when the verifier found a better
-   line, narrower scope, or different mechanism. Drop `FALSIFIED` findings from
-   the main findings sections and note the falsification under **Disagreements**
-   with the verifier's evidence. Do not promote `INCONCLUSIVE` findings unless
-   you personally do one more code read and can resolve them; otherwise list
-   them under **Disagreements** as unverified.
-
-4. **Draft the final fix and rationale from verifier evidence.** Don't repeat
-   the panelist's `Fix:` line verbatim if it's vague. Use the verifier's
-   concrete fix, tighten it if needed, and include a 3–10 line code snippet for
-   non-trivial fixes. Explain what cause-effect chain the fix interrupts or what
-   invariant it restores.
-
-**Declare deep mode at the top of the synthesis (mandatory).** Right after the
-per-panelist sections and _before_ the `### Overview` heading, emit a single
-line so the user can verify deep mode actually ran without reading every entry:
-
-```md
-**Deep mode:** ON — verification subagents checked N findings across M
-panelists; dropped K as falsified, surfaced V.
-```
-
-The numbers must be real (count them as you go). If you skipped verification on
-any finding because the user scoped the request, say so:
-`**Deep mode:** ON (scope: criticals only) — verification subagents checked 3 / surfaced 3 / dropped 0; 4 LOW findings carried over from panelists without verification.`
-This declaration is the single source of truth for "did deep mode run" — if it
-isn't present, the synthesis was standard mode regardless of trigger phrasing.
-
-**Output shape.** Each finding entry in `### must-fix`, `### should-fix`, and
-`### Disagreements` uses the same `[SEVERITY] / Fix / Flagged by` skeleton as
-standard mode, with two extra detail lines (`Why:` and `Verified by:`) inserted
-between `Fix:` and `Flagged by:`. Same anchor lines, same labels — deep mode
-just interleaves evidence:
-
-```md
-- [SEVERITY] [file:line](url) — one-sentence issue. Fix: concrete change, with a
-  code snippet for non-trivial cases, anchored at file:line. Why: one or two
-  sentences on the mechanism (e.g. "serializing check + load behind the same
-  mutex closes the TOCTOU window — no goroutine can mutate claims between
-  validation and use"). Verified by: subagent read auth/session.go:80–96 — the
-  signature check at line 84 reads tok.claims before the cache load at line 88
-  acquires the mutex; a second goroutine can swap claims in the window. Cite
-  files/lines; do not assert without evidence. Flagged by 2: codex (gpt-5.5),
-  claude (claude-opus-4.7)
-```
-
-LOW findings in `### polish` stay collapsed to one line in deep mode too —
-verifying every LOW is high cost for low decision-value, and the single-line
-shape keeps `### polish` skimmable in both modes. The exception is items the
-verifier promoted out of LOW (`Status: CORRECTED` with a severity bump): those
-findings have already moved into `### should-fix` or `### must-fix` and use the
-full deep-mode shape there.
-
-A substantiated `Approach (questionable):` entry in `### must-fix` follows the
-same skeleton under deep mode, but the leading `file:line` is replaced with the
-root-cause location as in standard mode:
-
-```md
-- [HIGH] root cause: <named location> —
-  <one-sentence summary of the wrong-layer fix>. Fix: <concrete cross-layer
-  change — often a migration / schema / API contract change, not a line edit>,
-  anchored at the root-cause location. Why: <one or two sentences on the
-  mechanism — what invariant the cross-layer fix restores>. Verified by:
-  <how the verifier confirmed the root cause exists and the current change is symptomatic>.
-  Flagged by: codex (gpt-5.5)
-```
-
-If `### Approach check` is emitted as its own section (questionable flag
-verified), its quoted-panelist block stays as in standard mode — the
-verification and proposed-fix detail lives on the corresponding `### must-fix`
-entry, not duplicated in `### Approach check`.
-
-**If many findings drop during verification**, surface that in **Risk** —
-panelist signal-to-noise is part of the picture and worth telling the user about
-("3 of 7 codex findings falsified on read-through; treat the remaining 2 as the
-real signal").
 
 ## Reference
 
