@@ -79,26 +79,25 @@ When _not_ to use:
      scope-echo heartbeat
      (`panel-review: scope vs <base>: N commits, M files changed, K insertions(+), L deletions(-)`)
      matches the PR's own commit count before trusting the synthesized findings.
-2. **Pick panelists.** Panelists come in two kinds: **CLI-backed** (codex /
-   claude / opencode — spawned by the script, each reads the whole diff) and
-   **orchestrated** (run by the coordinator as a subagent fan-out, e.g.
-   `decompose`; see the **Panelist catalog** below). This step picks the
-   CLI-backed panel; orchestrated panelists are opt-in and selected per the
-   catalog. Default CLI panel: every supported CLI on `PATH` (codex, claude,
-   opencode). The user may name a subset, choose a model per reviewer, or run
-   the same backend more than once on different models. Pass each reviewer as
-   `--panelist backend[:model]` (repeatable); the backend is codex/claude/
-   opencode and the optional `:model` is forwarded to that CLI. Examples:
+2. **Pick panelists.** Every panelist is a CLI backend (codex / claude /
+   opencode) running in its own subprocess. Default: every supported CLI on
+   `PATH`. The user may name a subset, choose a model per reviewer, or run the
+   same backend more than once on different models. Pass each reviewer as
+   `--panelist backend[/approach][:model]` (repeatable); the backend is codex/
+   claude/opencode, the optional `:model` is forwarded to that CLI, and the
+   optional `/approach` tells that panelist _how_ to review (see **Review
+   approaches** below). Examples:
    - "panel review with claude on opus-4.8" → `--panelist claude:opus-4.8`
    - "panel review with claude and two opencode reviewers, qwen and glm" →
      `--panelist claude --panelist opencode:qwen-3.7 --panelist opencode:glm-5.2`
      (bare `claude` because the user pinned no Claude model; the opencode
      reviewers are pinned because the user named their models) A bare
      `--panelist claude` (no model) uses that backend's `*_MODEL` env default.
-     Each panelist gets a unique id (e.g. `opencode-qwen-3.7`) used in its
-     `## <id> / <model>` section header, `started`/`done` heartbeats, todos, and
-     worktree dir — so two reviewers on the same backend never collide. The user
-     can also set models entirely from the environment via
+     Each panelist gets a unique id (e.g. `opencode-qwen-3.7`,
+     `claude-opus-4.8-decompose`) used in its `## <id> / <model>` section
+     header, `started`/`done` heartbeats, todos, and worktree dir — so two
+     reviewers on the same backend never collide. The user can also set models
+     entirely from the environment via
      `PANEL_REVIEW_PANELISTS="claude:opus-4.8 opencode:qwen-3.7 opencode:glm-5.2"`.
 3. **Capture optional focus.** If the user gave context ("look closely at the
    auth changes"), pass `--focus`.
@@ -547,40 +546,39 @@ When _not_ to use:
     is the _only_ license to rewrite a finding's substance — and only when you
     have actually checked the code.
 
-## Panelist catalog
+## Review approaches
 
-Every panelist — CLI-backed or orchestrated — contributes the **same thing**: a
-ledger of findings in the standard per-finding shape (the
-`[SEVERITY] file:line — issue. Fix: … Flagged by: <id>` skeleton from the
-findings-buckets section, plus the `Goal:` / `Approach:` tags). Synthesis (steps
-7–10) consumes ledgers and does not care how a panelist produced its findings,
-so each panelist's `Flagged by:` id is just another voice — a finding only one
-panelist raised is unique, one two raised is consensus. **This ledger contract
-is the extension point: a new panelist is "emit a conforming ledger," and
-nothing in synthesis changes.**
+Every panelist is a CLI subprocess that reads the diff and emits findings in the
+standard shape — so synthesis (steps 7–10) is panelist-agnostic and never
+changes when you add one. What _can_ vary is **how** a panelist reviews: an
+**approach** is a block of extra instructions appended to that panelist's
+prompt. The default (empty) approach is a standard whole-diff review.
 
-**CLI-backed panelists** (`codex` / `claude` / `opencode`) are spawned by
-`panel-review.sh`, run worktree-isolated, and each read the whole diff. Selected
-in step 2 via `--panelist` / auto-detect. This is the default panel.
+Select an approach two ways:
 
-**Orchestrated panelists** are not CLI subprocesses — the coordinator runs each
-as a subagent fan-out after the script's panelists are launched (the slot the
-old deep mode used), then folds its single ledger into synthesis like any
-panelist. They are **opt-in** (a CLI-only panel is the default) because they
-cost more: select one by name when the user asks, or a caller (e.g.
-`bot-panel-review-loop`) always includes it. Each is specified in its own
-`reviewers/<id>.md` file — read that file when the panelist is selected and
-follow it. Current catalog:
+- **Per panelist:** `--panelist backend[/approach][:model]` — that one panelist
+  reviews using the approach (e.g. `--panelist claude/decompose:opus-4.8`).
+- **Run default:** `--approach <name>` — applies to every panelist that didn't
+  set its own (e.g. `--approach decompose` makes the whole auto-detected panel
+  use it). A per-panelist `/approach` overrides the run default.
 
-- **`decompose`** (`reviewers/decompose.md`) — improves recall on large diffs by
-  reviewing the change in focused, scoped chunks plus a cross-boundary seam
-  pass, returning one merged ledger. Self-scales down on small diffs. Cost: one
-  scoped sub-reviewer per chunk (≤ 4) + one seam reviewer.
+Either way the panelist still runs as a normal CLI backend and its findings fold
+into synthesis like any other — a `decompose` panelist's findings are just
+another `Flagged by:` voice (unique if it alone caught something, consensus if a
+holistic panelist caught it too). No coordinator, no subagent fan-out.
 
-**To add a panelist:** drop a `reviewers/<id>.md` spec (its procedure + the
-ledger it emits), add one bullet above, and you are done — step 2 selection and
-the synthesis steps already handle it, because both speak only the ledger
-contract.
+Current approaches:
+
+- **`decompose`** — improves recall on large diffs: the panelist chunks the
+  changed files into coherent groups (sensitive surfaces isolated) and reviews
+  each closely, then does a dedicated cross-boundary seam pass. The work happens
+  inside that one CLI subprocess. Self-scales down on small diffs.
+
+**To add an approach:** drop a `prompts/approaches/<name>.md` fragment (extra
+"how to review" instructions, appended after the base prompt). It is valid
+immediately — the script accepts `--approach <name>` / `/<name>` as soon as the
+file exists, and synthesis is unchanged because the panelist still emits the
+standard finding shape.
 
 ## Reference
 

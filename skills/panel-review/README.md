@@ -32,11 +32,18 @@ panelists from your phrasing:
 
 ## Choosing reviewers and models
 
-Each reviewer is a `--panelist backend[:model]` spec, where backend is `codex`,
-`claude`, or `opencode`, and the optional `:model` is the **exact** model id
-that backend's CLI expects (it's forwarded verbatim as `-m` / `--model`). The
-same backend can appear multiple times with different models, so you can fan one
-change out to several models — even several models of the same tool.
+Each reviewer is a `--panelist backend[/approach][:model]` spec, where backend
+is `codex`, `claude`, or `opencode`, and the optional `:model` is the **exact**
+model id that backend's CLI expects (it's forwarded verbatim as `-m` /
+`--model`). The same backend can appear multiple times with different models, so
+you can fan one change out to several models — even several models of the same
+tool.
+
+The optional `/approach` tells that panelist _how_ to review (e.g.
+`--panelist claude/decompose:opus-4.8` reviews by chunking the diff + a seam
+pass). `--approach <name>` sets a default approach for the whole panel.
+Approaches are prompt fragments under `prompts/approaches/`; `decompose` ships
+built in, and adding one is just dropping a `prompts/approaches/<name>.md` file.
 
 A concrete four-reviewer panel — claude on Opus 4.8, codex on GPT-5.5, and two
 opencode reviewers on different `opencode-go` models:

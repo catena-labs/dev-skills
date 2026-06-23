@@ -18,11 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #                   appended by the script.
 PROMPT_TEMPLATE="$SCRIPT_DIR/prompts/review.md"
 PROMPT_TEMPLATE_PR="$SCRIPT_DIR/prompts/review-pr.md"
+APPROACHES_DIR="$SCRIPT_DIR/prompts/approaches"   # one <name>.md fragment per review approach
 
 # ----- Defaults -----
 TARGET="uncommitted"           # uncommitted | staged | base:<ref> | commit:<sha> | pr:<ref>
 TARGET_EXPLICIT=0              # set to 1 by any --uncommitted/--staged/--base/--commit/--pr flag
 FOCUS=""
+RUN_APPROACH=""                # default review approach (empty = standard); per-panelist /approach overrides it
 OUT_DIR=""
 TIMEOUT_SECS="${PANEL_REVIEW_TIMEOUT:-600}"
 MAX_DIFF_BYTES="${PANEL_REVIEW_MAX_DIFF_BYTES:-200000}"
@@ -81,6 +83,7 @@ OPENCODE_AGENT_DEEP="${OPENCODE_AGENT_DEEP:-build}"
 PANEL_IDS=()
 PANEL_BACKENDS=()
 PANEL_MODELS=()
+PANEL_APPROACHES=()
 
 # Sanitize an arbitrary string (e.g. a model id) into an id fragment safe for
 # filesystem paths and `git worktree add`. Everything outside [A-Za-z0-9._-] —
@@ -101,8 +104,24 @@ panel_index() {
   return 1
 }
 
-panel_backend() { local i; i="$(panel_index "$1")" || return 1; printf '%s' "${PANEL_BACKENDS[$i]}"; }
-panel_model()   { local i; i="$(panel_index "$1")" || return 1; printf '%s' "${PANEL_MODELS[$i]}"; }
+panel_backend()  { local i; i="$(panel_index "$1")" || return 1; printf '%s' "${PANEL_BACKENDS[$i]}"; }
+panel_model()    { local i; i="$(panel_index "$1")" || return 1; printf '%s' "${PANEL_MODELS[$i]}"; }
+panel_approach() { local i; i="$(panel_index "$1")" || return 1; printf '%s' "${PANEL_APPROACHES[$i]}"; }
+
+# A review approach is valid iff a prompt fragment exists for it. Extension is
+# therefore "drop a file in prompts/approaches/" — no code change.
+validate_approach() {
+  local a="$1" ctx="$2"
+  [[ -f "$APPROACHES_DIR/$a.md" ]] || die "unknown approach '$a'${ctx:+ in $ctx} (no prompts/approaches/$a.md)"
+}
+
+# Resolve the approach actually used for a panelist: its own /approach if set,
+# else the run-level --approach default (which may be empty = standard review).
+effective_approach() {
+  local a; a="$(panel_approach "$1")"
+  [[ -n "$a" ]] && { printf '%s' "$a"; return; }
+  printf '%s' "$RUN_APPROACH"
+}
 
 # Resolve the model actually used for a panelist: the explicit per-panelist model
 # if set, else the backend's *_MODEL env default (which may itself be empty, i.e.
@@ -124,12 +143,15 @@ effective_model() {
 # headers); without a model it is just '<backend>'. Collisions get a numeric
 # suffix.
 register_panelist() {
-  local backend="$1" model="$2" base id n
+  local backend="$1" model="$2" approach="$3" base id n
   if [[ -n "$model" ]]; then
     base="${backend}-$(sanitize_id "$model")"
   else
     base="$backend"
   fi
+  # Fold the approach into the id so a holistic + decompose pair of the same
+  # backend/model get distinct ids, dirs, and `## <id> / <model>` headers.
+  [[ -n "$approach" ]] && base="${base}-${approach}"
   id="$base"
   n=2
   while panel_index "$id" >/dev/null 2>&1; do
@@ -139,21 +161,28 @@ register_panelist() {
   PANEL_IDS+=("$id")
   PANEL_BACKENDS+=("$backend")
   PANEL_MODELS+=("$model")
+  PANEL_APPROACHES+=("$approach")
 }
 
-# Parse a panelist spec 'backend[:model]' and register it. The backend is the
-# part before the first ':'; everything after is the model (kept verbatim,
-# including any '/' in provider/model ids — only the *id* derived from it is
-# sanitized). A bare 'backend' uses the backend's *_MODEL env default.
+# Parse a panelist spec 'backend[/approach][:model]' and register it. The model
+# is everything after the FIRST ':' (kept verbatim, including any '/' in
+# provider/model ids — only the *id* derived from it is sanitized). The optional
+# '/approach' lives in the pre-colon part, so a '/' inside a model id is never
+# mistaken for an approach. A bare 'backend' uses the backend's *_MODEL env
+# default and the standard review approach. Examples:
+#   claude:opus-4.8                -> backend claude, model opus-4.8, standard
+#   claude/decompose:opus-4.8      -> backend claude, model opus-4.8, decompose
+#   opencode:openrouter/qwen-3.7   -> backend opencode, model openrouter/qwen-3.7
 add_panelist_spec() {
-  local spec="$1" backend model
-  backend="${spec%%:*}"
-  if [[ "$spec" == *:* ]]; then model="${spec#*:}"; else model=""; fi
+  local spec="$1" left backend model approach
+  if [[ "$spec" == *:* ]]; then left="${spec%%:*}"; model="${spec#*:}"; else left="$spec"; model=""; fi
+  if [[ "$left" == */* ]]; then backend="${left%%/*}"; approach="${left#*/}"; else backend="$left"; approach=""; fi
   case "$backend" in
     codex|claude|opencode) ;;
     *) die "--panelist: unknown backend '$backend' in spec '$spec' (allowed: codex, claude, opencode)" ;;
   esac
-  register_panelist "$backend" "$model"
+  [[ -n "$approach" ]] && validate_approach "$approach" "spec '$spec'"
+  register_panelist "$backend" "$model" "$approach"
 }
 
 usage() {
@@ -173,15 +202,23 @@ Targets (pick one; default tries to auto-detect a PR for the current branch via
 
 Options:
   --focus TEXT            Optional focus / context for the reviewers
-  --panelist SPEC         Add a panelist (repeatable). SPEC is 'backend[:model]'
-                          where backend is codex, claude, or opencode. The same
-                          backend may be used more than once with different
-                          models — e.g. two opencode reviewers:
+  --approach NAME         Default review approach for all panelists that don't
+                          set their own (see /approach below). NAME must have a
+                          prompts/approaches/NAME.md fragment. Empty = standard
+                          whole-diff review. e.g. --approach decompose makes the
+                          whole panel review by chunking the diff + a seam pass.
+  --panelist SPEC         Add a panelist (repeatable). SPEC is
+                          'backend[/approach][:model]' where backend is codex,
+                          claude, or opencode. The same backend may be used more
+                          than once with different models or approaches — e.g.:
                             --panelist claude:opus-4.8 \\
                             --panelist opencode:qwen-3.7 \\
-                            --panelist opencode:glm-5.2
-                          A bare 'backend' (no ':model') uses that backend's
-                          *_MODEL env default. If no --panelist is given, falls
+                            --panelist claude/decompose:opus-4.8
+                          '/approach' tells that one panelist how to review
+                          (overrides --approach); it must have a
+                          prompts/approaches/<approach>.md fragment. A bare
+                          'backend' uses that backend's *_MODEL env default and
+                          the standard approach. If no --panelist is given, falls
                           back to \$PANEL_REVIEW_PANELISTS, then to auto-detecting
                           every supported CLI on PATH.
   --out-dir DIR           Where to write captured outputs (default: mktemp).
@@ -244,6 +281,7 @@ while [[ $# -gt 0 ]]; do
     --commit)      [[ $# -ge 2 ]] || die "--commit needs a SHA"; TARGET="commit:$2"; TARGET_EXPLICIT=1; shift 2 ;;
     --pr)          [[ $# -ge 2 ]] || die "--pr needs a number or URL"; TARGET="pr:$2"; TARGET_EXPLICIT=1; shift 2 ;;
     --focus)       [[ $# -ge 2 ]] || die "--focus needs text"; FOCUS="$2"; shift 2 ;;
+    --approach)    [[ $# -ge 2 ]] || die "--approach needs a name"; validate_approach "$2" "--approach"; RUN_APPROACH="$2"; shift 2 ;;
     --panelist)
       [[ $# -ge 2 ]] || die "--panelist needs a 'backend[:model]' spec"
       # add_panelist_spec validates the backend against the known set and derives
@@ -380,7 +418,7 @@ fi
 # model, so they inherit the backend's *_MODEL default (if any).
 if [[ ${#PANEL_IDS[@]} -eq 0 ]]; then
   for tool in codex claude opencode; do
-    command -v "$(panelist_bin "$tool")" >/dev/null 2>&1 && register_panelist "$tool" ""
+    command -v "$(panelist_bin "$tool")" >/dev/null 2>&1 && register_panelist "$tool" "" ""
   done
 fi
 [[ ${#PANEL_IDS[@]} -gt 0 ]] || die "no panelists found on PATH (looked for $CODEX_BIN, $CLAUDE_BIN, $OPENCODE_BIN)"
@@ -770,10 +808,15 @@ run_panelist() {
 #               the prompt only — no sandbox-level guarantee.
 build_argv() {
   local id="$1"
-  local backend bin model
+  local backend bin model approach prompt
   backend="$(panel_backend "$id")"
   bin="$(panelist_bin "$backend")"
   model="$(effective_model "$id")"
+  # Per-panelist prompt: the shared base, plus this panelist's approach fragment
+  # (if any) appended as extra instructions on *how* to review.
+  approach="$(effective_approach "$id")"
+  prompt="$PROMPT_CONTENT"
+  [[ -n "$approach" ]] && prompt="$PROMPT_CONTENT"$'\n\n'"$(cat "$APPROACHES_DIR/$approach.md")"
   case "$backend" in
     codex)
       if (( CHECKOUT_MODE )); then
@@ -782,7 +825,7 @@ build_argv() {
         argv=("$bin" exec --skip-git-repo-check --sandbox read-only --color=never)
       fi
       [[ -n "$model" ]] && argv+=(-m "$model")
-      argv+=(-- "$PROMPT_CONTENT")
+      argv+=(-- "$prompt")
       ;;
     claude)
       if (( CHECKOUT_MODE )); then
@@ -794,7 +837,7 @@ build_argv() {
         argv=("$bin" -p --permission-mode plan --output-format text --no-session-persistence)
       fi
       [[ -n "$model" ]] && argv+=(--model "$model")
-      argv+=(-- "$PROMPT_CONTENT")
+      argv+=(-- "$prompt")
       ;;
     opencode)
       # `opencode run` takes the message positionally; --prompt is not a flag here
@@ -804,7 +847,7 @@ build_argv() {
       argv=("$bin" run --agent "$agent")
       (( CHECKOUT_MODE )) && argv+=(--dangerously-skip-permissions)
       [[ -n "$model" ]] && argv+=(--model "$model")
-      argv+=(-- "$PROMPT_CONTENT")
+      argv+=(-- "$prompt")
       ;;
     *)
       argv=()
