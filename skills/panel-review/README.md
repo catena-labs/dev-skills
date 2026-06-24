@@ -32,11 +32,18 @@ panelists from your phrasing:
 
 ## Choosing reviewers and models
 
-Each reviewer is a `--panelist backend[:model]` spec, where backend is `codex`,
-`claude`, or `opencode`, and the optional `:model` is the **exact** model id
-that backend's CLI expects (it's forwarded verbatim as `-m` / `--model`). The
-same backend can appear multiple times with different models, so you can fan one
-change out to several models — even several models of the same tool.
+Each reviewer is a `--panelist backend[/approach][:model]` spec, where backend
+is `codex`, `claude`, or `opencode`, and the optional `:model` is the **exact**
+model id that backend's CLI expects (it's forwarded verbatim as `-m` /
+`--model`). The same backend can appear multiple times with different models, so
+you can fan one change out to several models — even several models of the same
+tool.
+
+The optional `/approach` tells that panelist _how_ to review (e.g.
+`--panelist claude/decompose:opus-4.8` reviews by chunking the diff + a seam
+pass). `--approach <name>` sets a default approach for the whole panel.
+Approaches are prompt fragments under `prompts/approaches/`; `decompose` ships
+built in, and adding one is just dropping a `prompts/approaches/<name>.md` file.
 
 A concrete four-reviewer panel — claude on Opus 4.8, codex on GPT-5.5, and two
 opencode reviewers on different `opencode-go` models:
@@ -87,12 +94,6 @@ Each reviewer gets a unique id (e.g. `opencode-opencode-go-glm-5.2`) so two
 reviewers on the same backend keep separate worktrees, output files, and report
 sections.
 
-Add "deep" / "verify each finding" / "dig into the findings" to opt into deep
-mode: after the panelists finish, the coordinator spins off verification
-subagents for every finding, then synthesizes their evidence, concrete fixes,
-and fix rationale. Token-heavy — routine reviews should stick with the standard
-synthesis.
-
 ## What it does
 
 - Auto-detects whether the current branch has an open GitHub PR and switches to
@@ -123,8 +124,7 @@ synthesis.
   clock, so foreground calls block silently for minutes. Do not launch
   `panel-review.sh` via the `Agent` tool / subagents — there's no
   streaming-output API for in-flight subagents and the heartbeats become
-  invisible. Deep mode's post-processing verification subagents are the
-  exception, and only run after panelists finish.
+  invisible.
 - **Worktree mode is strictly less safe than the local-diff mode.** It gives
   panelists write/exec access in their worktree and shares your parent repo's
   `.git` objects, so a stray `git push` from a panelist would publish from your
