@@ -83,14 +83,14 @@ report as a one-liner (`3 known gates, unchanged`) but it is **not** actionable
 and does not make the PR busy. You ack threads with `mark-seen.sh` (see check
 3); it is the ledger's only writer.
 
-| bucket         | route to                                            |
-| -------------- | --------------------------------------------------- |
-| `CONFLICTING`  | Check 1 (freshness / conflict resolution)           |
-| `CI_FAIL`      | Check 2 (read `failingLogs[].excerpt` first)        |
-| `HAS_COMMENTS` | Check 3 (triage `threads` + `rootComments`)         |
-| `BEHIND`       | Check 1 (up-to-date gate)                           |
-| `CI_PENDING`   | nothing — checks still running, recheck next tick   |
-| `GREEN_IDLE`   | nothing                                             |
+| bucket         | route to                                          |
+| -------------- | ------------------------------------------------- |
+| `CONFLICTING`  | Check 1 (freshness / conflict resolution)         |
+| `CI_FAIL`      | Check 2 (read `failingLogs[].excerpt` first)      |
+| `HAS_COMMENTS` | Check 3 (triage `threads` + `rootComments`)       |
+| `BEHIND`       | Check 1 (up-to-date gate)                         |
+| `CI_PENDING`   | nothing — checks still running, recheck next tick |
+| `GREEN_IDLE`   | nothing                                           |
 
 ## Checks (in order)
 
@@ -194,7 +194,7 @@ and does not make the PR busy. You ack threads with `mark-seen.sh` (see check
 
 | Mistake                                     | Reality                                                                                                                        |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Adding a temp worktree to do the work       | You are already on the PR's branch; fix in place                                                                              |
+| Adding a temp worktree to do the work       | You are already on the PR's branch; fix in place                                                                               |
 | Rebase + force-with-lease on an approved PR | Ready PRs get merge commits or appended fixes                                                                                  |
 | Updating a behind-but-green branch          | No-conflict, green, no up-to-date gate = leave it                                                                              |
 | Nesting another PR-watching loop            | Two schedulers fight over the session wakeup; this skill is the loop body                                                      |

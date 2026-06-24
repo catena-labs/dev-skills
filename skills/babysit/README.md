@@ -55,8 +55,8 @@ assumes you're inside the target git repo (or pass `--repo owner/name`).
 - **Fixes freshness without rewriting history.** Updates the branch only when it
   truly needs it (real conflicts, an up-to-date branch-protection gate, or CI
   that must re-run against new main) via a merge commit — **never** a rebase or
-  force-push on a non-draft PR, so reviewers keep their place and inline comments
-  stay attached.
+  force-push on a non-draft PR, so reviewers keep their place and inline
+  comments stay attached.
 - **Fixes only mechanical CI failures autonomously.** Lint, format, unused
   imports, trivially broken tests get appended fix commits. Anything
   non-mechanical — logic, flaky infra, or a fix touching auth, money movement,
@@ -65,12 +65,13 @@ assumes you're inside the target git repo (or pass `--repo owner/name`).
   both inline and root-level — are run through the `triage-pr-comments`
   sub-skill, which owns the whole comment engine: the analysis _and_ the
   reply/resolve mechanics. When a comment leads to a fix, that engine pushes the
-  fix, posts a concise reply describing it, and **resolves** the inline thread on
-  GitHub (root-level comments get a reply and a ledger ack, since GitHub can't
-  resolve them). Threads you've deliberately left as standing gates are acked in
-  a local seen-ledger via `mark-seen.sh` so they stop re-surfacing every tick; a
-  later reviewer reply mints a fresh signature and the thread comes back on its
-  own. Replies to a human reviewer are still drafted for your approval first.
+  fix, posts a concise reply describing it, and **resolves** the inline thread
+  on GitHub (root-level comments get a reply and a ledger ack, since GitHub
+  can't resolve them). Threads you've deliberately left as standing gates are
+  acked in a local seen-ledger via `mark-seen.sh` so they stop re-surfacing
+  every tick; a later reviewer reply mints a fresh signature and the thread
+  comes back on its own. Replies to a human reviewer are still drafted for your
+  approval first.
 - **Works drafts too.** Unlike `babysit-prs`, it doesn't skip a draft PR — you
   invoked it on the PR you're sitting on. It still never rewrites history.
 - **Stops and asks at the right moments.** Design/architecture change requests,
