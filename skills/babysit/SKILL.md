@@ -49,6 +49,9 @@ and emits one compact JSON digest:
     "newRootComments": 0,           // unseen non-author, non-bot root (issue) comments
     "standingRootGates": 0,         // of those, already acked
     "rootComments": [{ "sig", "author", "at" }],  // the unseen root comments only
+    "newReviewComments": 0,         // unseen non-author, non-bot review-summary bodies
+    "standingReviewGates": 0,       // of those, already acked
+    "reviewComments": [{ "sig", "author", "state", "at" }],  // the unseen review summaries only
     "failingLogs": [{ "check", "jobId", "excerpt" }],  // ~40-line error signature only
     "bucket": "CONFLICTING | CI_FAIL | HAS_COMMENTS | BEHIND | CI_PENDING | GREEN_IDLE"
   }
@@ -64,19 +67,22 @@ hint built from the raw fields, which stay in the object; trust your judgment
 over the label when they disagree.
 
 **Seen-ledger.** The split into _new_ (unacked) and _standing_ (acked) is the
-whole point: `HAS_COMMENTS` fires on `newThreads`/`newRootComments`, never on
-the total `unresolvedThreads`, so a comment you have already triaged never
-re-surfaces.
+whole point: `HAS_COMMENTS` fires on
+`newThreads`/`newRootComments`/`newReviewComments`, never on the total
+`unresolvedThreads`, so a comment you have already triaged never re-surfaces.
 
-- **Two channels, same shape.** Inline review `threads` and root-level
-  `rootComments` — the latter catches a finding a reviewer drops on a line
-  outside the diff, which the inline-thread query never sees. Both arrays carry
-  only the **unseen** items, no bodies (fetch those yourself for just these);
-  inline threads also carry the GraphQL `threadId` you pass to resolve them
-  (check 3).
+- **Three channels, same shape.** Inline review `threads`, root-level
+  `rootComments`, and review-summary `reviewComments` — the root channel catches
+  a finding a reviewer drops on a line outside the diff, and the review channel
+  catches a `CHANGES_REQUESTED` review whose feedback lives in the top-level
+  body with no inline/root comment; the inline-thread query sees neither. All
+  three arrays carry only the **unseen** items, no bodies (fetch those yourself
+  for just these); inline threads also carry the GraphQL `threadId` you pass to
+  resolve them (check 3), and review summaries carry their `state` so an
+  `APPROVED`-with-body reads as a likely dismiss.
 - **Sigs self-heal.** Inline sig is `"c"+<last-comment id>`, root is
-  `"r"+<comment id>` — so a later reviewer reply mints a new sig and the item
-  re-surfaces on its own.
+  `"r"+<comment id>`, review summary is `"v"+<review id>` — so a later reviewer
+  reply or new review mints a new sig and the item re-surfaces on its own.
 - **Standing gates are noise, not work.** Already-acked-but-open items
   (`standingGates` / `standingRootGates`) get a one-liner in the report
   (`3 known gates, unchanged`) but are **not** actionable and never make the PR
@@ -87,14 +93,14 @@ re-surfaces.
 - **Only `mark-seen.sh` writes the ledger** (see check 3); `scan.sh` only reads
   it.
 
-| bucket         | route to                                          |
-| -------------- | ------------------------------------------------- |
-| `CONFLICTING`  | Check 1 (freshness / conflict resolution)         |
-| `CI_FAIL`      | Check 2 (read `failingLogs[].excerpt` first)      |
-| `HAS_COMMENTS` | Check 3 (triage `threads` + `rootComments`)       |
-| `BEHIND`       | Check 1 (up-to-date gate)                         |
-| `CI_PENDING`   | nothing — checks still running, recheck next tick |
-| `GREEN_IDLE`   | nothing                                           |
+| bucket         | route to                                                       |
+| -------------- | -------------------------------------------------------------- |
+| `CONFLICTING`  | Check 1 (freshness / conflict resolution)                      |
+| `CI_FAIL`      | Check 2 (read `failingLogs[].excerpt` first)                   |
+| `HAS_COMMENTS` | Check 3 (triage `threads` + `rootComments` + `reviewComments`) |
+| `BEHIND`       | Check 1 (up-to-date gate)                                      |
+| `CI_PENDING`   | nothing — checks still running, recheck next tick              |
+| `GREEN_IDLE`   | nothing                                                        |
 
 ## Checks (in order)
 
@@ -112,12 +118,16 @@ re-surfaces.
    appended commits. Non-mechanical failures (logic, flaky infra, anything
    touching auth/money/schema): report and ask. Classifying mechanical-vs-not is
    your call, not the scanner's.
-3. **Comments.** Work the **unseen** items from both channels: the `threads`
-   array (inline review) and the `rootComments` array (root-level PR
-   conversation). Fetch bodies for just those — inline via
+3. **Comments.** Work the **unseen** items from all three channels: the
+   `threads` array (inline review), the `rootComments` array (root-level PR
+   conversation), and the `reviewComments` array (review-summary bodies). Fetch
+   bodies for just those — inline via
    `gh api repos/<owner>/<name>/pulls/comments/<id>` (id = the `sig` minus its
    `c` prefix), root via `gh api repos/<owner>/<name>/issues/comments/<id>` (id
-   = the `sig` minus its `r` prefix).
+   = the `sig` minus its `r` prefix), and review summaries via
+   `gh api repos/<owner>/<name>/pulls/<number>/reviews/<id>` (id = the `sig`
+   minus its `v` prefix). `triage-pr-comments` also fetches review bodies
+   itself, so you can hand it the PR and let it pull them.
 
    **REQUIRED SUB-SKILL: triage-pr-comments.** It owns the whole comment engine
    — the analysis (understand → assess → verdict) **and** the reply/resolve
@@ -137,9 +147,10 @@ re-surfaces.
      thread to `resolveReviewThread` — no need to re-query it.
    - **What retires an item, and the ledger.** Resolving an inline thread
      retires it (the scanner filters `isResolved`), so do **not** also ack it. A
-     **root** comment has no thread to resolve, so after replying, **ack** it in
-     the ledger (below). If `resolveReviewThread` fails, ack the inline `sig` as
-     a fallback so the loop doesn't re-handle a landed fix.
+     **root** comment or a **review summary** has no thread to resolve, so after
+     replying, **ack** it in the ledger (below). If `resolveReviewThread` fails,
+     ack the inline `sig` as a fallback so the loop doesn't re-handle a landed
+     fix.
    - **On failure.** triage's Step 5 ordering applies (a failed push aborts the
      replies and resolves). Surface any reply/resolve failures in the tick
      report; never report a comment as handled while its reply or resolve is
@@ -155,10 +166,11 @@ re-surfaces.
    ```
 
    Use a `--verdict` tag: `human-gate`, `wontfix`, `deferred`, or `handled` for
-   no-action acks, or `fixed` for the root-comment / resolve-failed fallback
-   above. **Do NOT** pre-ack a thread before its fix lands — for inline fixes,
-   reply + resolve retires it; the ledger is only for items GitHub won't resolve
-   for you (no-action gates and replied-to root comments).
+   no-action acks, or `fixed` for the root-comment / review-summary /
+   resolve-failed fallback above. **Do NOT** pre-ack a thread before its fix
+   lands — for inline fixes, reply + resolve retires it; the ledger is only for
+   items GitHub won't resolve for you (no-action gates and replied-to root
+   comments).
 
 ## Mechanics
 

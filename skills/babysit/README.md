@@ -61,17 +61,18 @@ assumes you're inside the target git repo (or pass `--repo owner/name`).
   imports, trivially broken tests get appended fix commits. Anything
   non-mechanical — logic, flaky infra, or a fix touching auth, money movement,
   or schema — is reported and handed back to you.
-- **Triages review comments, then replies and resolves.** New reviewer threads —
-  both inline and root-level — are run through the `triage-pr-comments`
-  sub-skill, which owns the whole comment engine: the analysis _and_ the
-  reply/resolve mechanics. When a comment leads to a fix, that engine pushes the
-  fix, posts a concise reply describing it, and **resolves** the inline thread
-  on GitHub (root-level comments get a reply and a ledger ack, since GitHub
-  can't resolve them). Threads you've deliberately left as standing gates are
-  acked in a local seen-ledger via `mark-seen.sh` so they stop re-surfacing
-  every tick; a later reviewer reply mints a fresh signature and the thread
-  comes back on its own. Replies to a human reviewer are still drafted for your
-  approval first.
+- **Triages review comments, then replies and resolves.** New reviewer feedback
+  — inline threads, root-level comments, and review-summary bodies (so a
+  `CHANGES_REQUESTED` review with no inline comment isn't missed) — is run
+  through the `triage-pr-comments` sub-skill, which owns the whole comment
+  engine: the analysis _and_ the reply/resolve mechanics. When a comment leads
+  to a fix, that engine pushes the fix, posts a concise reply describing it, and
+  **resolves** the inline thread on GitHub (root-level comments get a reply and
+  a ledger ack, since GitHub can't resolve them). Threads you've deliberately
+  left as standing gates are acked in a local seen-ledger via `mark-seen.sh` so
+  they stop re-surfacing every tick; a later reviewer reply mints a fresh
+  signature and the thread comes back on its own. Replies to a human reviewer
+  are still drafted for your approval first.
 - **Works drafts too.** Unlike `babysit-prs`, it doesn't skip a draft PR — you
   invoked it on the PR you're sitting on. It still never rewrites history.
 - **Stops and asks at the right moments.** Design/architecture change requests,

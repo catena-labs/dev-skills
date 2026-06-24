@@ -26,6 +26,9 @@
 #        "newRootComments": int,       // unseen non-author, non-bot root (issue) comments
 #        "standingRootGates": int,     // of those, already acked
 #        "rootComments": [ {sig, author, at} ],  // the unseen root comments only
+#        "newReviewComments": int,     // unseen non-author, non-bot review-summary bodies
+#        "standingReviewGates": int,   // of those, already acked
+#        "reviewComments": [ {sig, author, state, at} ],  // the unseen review summaries only
 #        "failingLogs": [ {check, jobId, excerpt} ],  // error signature only, capped
 #        "bucket": "CONFLICTING|CI_FAIL|HAS_COMMENTS|BEHIND|CI_PENDING|GREEN_IDLE"
 #     }
@@ -35,18 +38,21 @@
 # you are sitting on, so it works the PR whether or not it is a draft. isDraft is
 # carried through so the agent can mention it.
 #
-# Two comment channels are scanned: inline review threads (`threads`) and
-# root-level PR conversation comments (`rootComments`) — the latter is where a
-# reviewer drops a finding on a line outside the diff, which the inline-thread
-# query never sees. Both feed HAS_COMMENTS.
+# Three comment channels are scanned: inline review threads (`threads`),
+# root-level PR conversation comments (`rootComments`), and review-summary bodies
+# (`reviewComments`). The root channel catches a finding a reviewer drops on a
+# line outside the diff; the review channel catches a CHANGES_REQUESTED review
+# whose feedback lives in the top-level body with no inline/root comment — the
+# inline-thread query sees neither. All three feed HAS_COMMENTS.
 #
-# Seen-ledger: an inline thread's `sig` is "c"+<last-comment id> and a root
-# comment's `sig` is "r"+<comment id>, so a reviewer reply (new id) mints a fresh
-# sig and re-surfaces the item. mark-seen.sh (the only writer) records sigs the
-# agent triaged to a no-further-action verdict; this scanner only READS the
-# ledger to split new items from standing (acked) ones. HAS_COMMENTS fires on
-# newThreads or newRootComments, so once every item is acked the PR goes quiet
-# until one changes. Ledger lives at
+# Seen-ledger: an inline thread's `sig` is "c"+<last-comment id>, a root
+# comment's `sig` is "r"+<comment id>, and a review summary's `sig` is
+# "v"+<review id>, so a reviewer reply or new review (new id) mints a fresh sig
+# and re-surfaces the item. mark-seen.sh (the only writer) records sigs the agent
+# triaged to a no-further-action verdict; this scanner only READS the ledger to
+# split new items from standing (acked) ones. HAS_COMMENTS fires on newThreads,
+# newRootComments, or newReviewComments, so once every item is acked the PR goes
+# quiet until one changes. Ledger lives at
 # ${XDG_STATE_HOME:-$HOME/.local/state}/babysit/<owner>-<name>.json.
 #
 # Usage:
@@ -79,7 +85,7 @@ while [[ $# -gt 0 ]]; do
     --repo) REPO="${2:-}"; shift 2 ;;
     --pr) PR="${2:-}"; shift 2 ;;
     --no-logs) INCLUDE_LOGS=0; shift ;;
-    -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "scan.sh: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -94,10 +100,6 @@ fi
 [[ -z "$REPO" ]] && { echo "scan.sh: could not resolve repo slug (pass --repo owner/name)" >&2; exit 1; }
 OWNER="${REPO%%/*}"
 NAME="${REPO##*/}"
-
-# The author's own login, so we can tell "awaiting the author" threads from
-# threads whose last word came from a reviewer.
-ME="$(gh api user -q .login 2>/dev/null)" || ME=""
 
 # Seen-ledger (read-only here; mark-seen.sh is the only writer). A malformed or
 # absent file degrades to an empty object so a corrupt ledger never blocks a
@@ -122,11 +124,35 @@ log_excerpt_for_job() {
 }
 
 # Resolve the ONE PR to work. With --pr N, that exact PR; otherwise the PR for
-# the current branch. `gh pr view` exits non-zero when the branch has no PR — we
-# treat that as "nothing to babysit" and emit a null pr rather than failing.
-view_args=(--json number,title,headRefName,isDraft,mergeable,mergeStateStatus,reviewDecision)
-if [[ -n "$PR" ]]; then view_args=("$PR" "${view_args[@]}"); fi
-pr="$(gh pr view "${view_args[@]}" -R "$REPO" 2>/dev/null)" || pr=""
+# the current branch. Three outcomes are kept distinct — folding them all into
+# `2>/dev/null || pr=""` would turn an auth/network/API error into a silent
+# pr:null and a ~30-min nap on a phantom "no PR":
+#   - fetched OK but state != OPEN  -> emit pr:null (a closed/merged PR is
+#     nothing to babysit, and honors the "null when no open PR" contract).
+#   - default (current-branch) mode and the branch has no PR  -> emit pr:null.
+#   - explicit --pr, or any other gh error  -> print it and exit non-zero so the
+#     loop stops instead of mistaking a real failure for "nothing to do".
+view_args=(--json number,title,headRefName,isDraft,state,author,mergeable,mergeStateStatus,reviewDecision)
+# Explicit --pr targets that PR in $REPO; default mode resolves the current
+# branch's PR from the ambient git context. -R is omitted in the default case on
+# purpose: `gh pr view -R <repo>` demands a positional number/branch and errors
+# without one, which the old `2>/dev/null` hid as a phantom pr:null.
+if [[ -n "$PR" ]]; then
+  view_cmd=(gh pr view "$PR" "${view_args[@]}" -R "$REPO")
+else
+  view_cmd=(gh pr view "${view_args[@]}")
+fi
+pr_err="$(mktemp)"
+trap 'rm -f "$pr_err"' EXIT
+if pr="$("${view_cmd[@]}" 2>"$pr_err")"; then
+  [[ "$(printf '%s' "$pr" | jq -r '.state')" == "OPEN" ]] || pr=""
+elif [[ -z "$PR" ]] && grep -qiE 'no .*pull requests? found' "$pr_err"; then
+  pr=""   # current branch genuinely has no PR — nothing to babysit
+else
+  echo "scan.sh: could not resolve PR via 'gh pr view':" >&2
+  cat "$pr_err" >&2
+  exit 1
+fi
 if [[ -z "$pr" ]]; then
   jq -n --arg repo "$REPO" '{repo:$repo, anythingToDo:false, suggestedDelaySeconds:1800, pr:null}'
   exit 0
@@ -136,6 +162,7 @@ num="$(printf '%s' "$pr" | jq '.number')"
 title="$(printf '%s' "$pr" | jq -r '.title')"
 branch="$(printf '%s' "$pr" | jq -r '.headRefName')"
 isdraft="$(printf '%s' "$pr" | jq '.isDraft')"
+author="$(printf '%s' "$pr" | jq -r '.author.login // ""')"
 mergeable="$(printf '%s' "$pr" | jq -r '.mergeable')"
 mergestate="$(printf '%s' "$pr" | jq -r '.mergeStateStatus')"
 reviewdec="$(printf '%s' "$pr" | jq -r '.reviewDecision // ""')"
@@ -180,11 +207,11 @@ threads="$(gh api graphql --paginate \
 
 # One object per non-author, unresolved, not-outdated thread, tagged with its
 # seen-ledger signature ("c"+last-comment id) and whether that sig is acked.
-threads_full="$(printf '%s' "$threads" | jq --arg me "$ME" --argjson ledger "$ledger" '
+threads_full="$(printf '%s' "$threads" | jq --arg author "$author" --argjson ledger "$ledger" '
   [ .[]
     | select(.isResolved == false and .isOutdated == false)
     | (.comments.nodes | last) as $last
-    | select($last != null and $last.databaseId != null and $last.author.login != $me)
+    | select($last != null and $last.databaseId != null and $last.author.login != $author)
     | ("c" + ($last.databaseId | tostring)) as $sig
     | { sig: $sig, threadId: .id, path: .path, line: .line,
         lastAuthor: $last.author.login, at: $last.createdAt,
@@ -206,11 +233,11 @@ root_raw="$(gh api --paginate "repos/$REPO/issues/$num/comments" 2>/dev/null \
   | jq -s '[.[][]?]')" || root_raw="[]"
 [[ -z "$root_raw" ]] && root_raw="[]"
 root_full="$(printf '%s' "$root_raw" | jq \
-  --arg me "$ME" --argjson ledger "$ledger" --arg ignore "$IGNORE_LOGINS" '
+  --arg author "$author" --argjson ledger "$ledger" --arg ignore "$IGNORE_LOGINS" '
   ($ignore | split(",") | map(select(. != ""))) as $ignored
   | [ .[]
       | (.user.login // "") as $login
-      | select($login != $me
+      | select($login != $author
                and ((.user.type // "") != "Bot")
                and (($ignored | index($login)) | not))
       | ("r" + (.id | tostring)) as $sig
@@ -221,6 +248,36 @@ root_full="$(printf '%s' "$root_raw" | jq \
 rootnewcount="$(printf '%s' "$root_full" | jq '[.[] | select(.seen == false)] | length')"
 rootstanding="$(printf '%s' "$root_full" | jq '[.[] | select(.seen == true)] | length')"
 rootnew="$(printf '%s' "$root_full" | jq '[.[] | select(.seen == false) | del(.seen)]')"
+
+# Review-summary bodies (from pulls/{n}/reviews) — the third feedback channel. A
+# reviewer can request changes with their reasoning in the top-level review body
+# and no inline/root comment, which neither channel above sees; without this a
+# body-only CHANGES_REQUESTED review buckets as GREEN_IDLE and the PR silently
+# stalls. Keep non-empty, non-dismissed bodies from non-author, non-bot,
+# non-ignored reviewers; sig is "v"+<review id>, split new vs already-acked like
+# the other channels. State is carried so triage can read APPROVED-with-body as a
+# likely dismiss without re-fetching.
+reviews_raw="$(gh api --paginate "repos/$REPO/pulls/$num/reviews" 2>/dev/null \
+  | jq -s '[.[][]?]')" || reviews_raw="[]"
+[[ -z "$reviews_raw" ]] && reviews_raw="[]"
+reviews_full="$(printf '%s' "$reviews_raw" | jq \
+  --arg author "$author" --argjson ledger "$ledger" --arg ignore "$IGNORE_LOGINS" '
+  ($ignore | split(",") | map(select(. != ""))) as $ignored
+  | [ .[]
+      | (.user.login // "") as $login
+      | select(((.body // "") | gsub("\\s"; "")) != ""
+               and .state != "DISMISSED"
+               and $login != $author
+               and ((.user.type // "") != "Bot")
+               and (($ignored | index($login)) | not))
+      | ("v" + (.id | tostring)) as $sig
+      | { sig: $sig, author: $login, state: .state, at: .submitted_at,
+          seen: ($ledger | has($sig)) }
+    ]')"
+[[ -z "$reviews_full" ]] && reviews_full="[]"
+reviewnewcount="$(printf '%s' "$reviews_full" | jq '[.[] | select(.seen == false)] | length')"
+reviewstanding="$(printf '%s' "$reviews_full" | jq '[.[] | select(.seen == true)] | length')"
+reviewnew="$(printf '%s' "$reviews_full" | jq '[.[] | select(.seen == false) | del(.seen)]')"
 
 # Error signatures for failing checks, deduped by job and capped at 3 jobs.
 logs="[]"
@@ -251,7 +308,7 @@ if [[ "$mergeable" == "CONFLICTING" || "$mergestate" == "DIRTY" ]]; then
   bucket="CONFLICTING"
 elif [[ "$failed" -gt 0 ]]; then
   bucket="CI_FAIL"
-elif [[ "$newcount" -gt 0 || "$rootnewcount" -gt 0 ]]; then
+elif [[ "$newcount" -gt 0 || "$rootnewcount" -gt 0 || "$reviewnewcount" -gt 0 ]]; then
   bucket="HAS_COMMENTS"
 elif [[ "$mergestate" == "BEHIND" ]]; then
   bucket="BEHIND"
@@ -277,6 +334,9 @@ pr_obj="$(jq -n \
   --argjson newRootComments "$rootnewcount" \
   --argjson standingRootGates "$rootstanding" \
   --argjson rootComments "$rootnew" \
+  --argjson newReviewComments "$reviewnewcount" \
+  --argjson standingReviewGates "$reviewstanding" \
+  --argjson reviewComments "$reviewnew" \
   --argjson failingLogs "$logs" \
   --arg bucket "$bucket" \
   '{number:$number, title:$title, branch:$branch, isDraft:$isDraft,
@@ -284,7 +344,9 @@ pr_obj="$(jq -n \
     ci:$ci, unresolvedThreads:$unresolvedThreads, newThreads:$newThreads,
     standingGates:$standingGates, threads:$threads,
     newRootComments:$newRootComments, standingRootGates:$standingRootGates,
-    rootComments:$rootComments, failingLogs:$failingLogs,
+    rootComments:$rootComments,
+    newReviewComments:$newReviewComments, standingReviewGates:$standingReviewGates,
+    reviewComments:$reviewComments, failingLogs:$failingLogs,
     bucket:$bucket}')"
 
 printf '%s' "$pr_obj" | jq --arg repo "$REPO" '
