@@ -9,19 +9,17 @@ description:
 # Babysit (single PR)
 
 One invocation = one health pass over the **single PR this branch is on** (or
-the PR passed via `--pr N`). This is the single-PR sibling of `/babysit-prs`:
-the same freshness / CI / comment checks, scoped to one PR instead of the whole
-fleet. Designed to be driven by `/loop /babysit` (dynamic mode). Do NOT also run
-`/monitor-pr` or `/babysit-prs` in the same session — each is its own loop and
-the schedulers would fight over the session's single wakeup.
+the PR passed via `--pr N`): keep it mergeable, CI green, and review comments
+handled. Designed to be driven by `/loop /babysit` (dynamic mode). Do NOT nest
+another per-tick scheduler or PR-watching loop in the same session — two
+schedulers would fight over the session's single wakeup.
 
 You are already on the PR's branch (that is the whole premise), so fixes happen
 **directly in this worktree** — no `git worktree add`, no temp checkout.
 
-Unlike `/babysit-prs`, this does **not** skip drafts: you invoked it on the PR
-you are sitting on, so it works the PR whether or not it is a draft (`isDraft`
-is reported so you can call it out). The never-rewrite-history rule below still
-holds regardless.
+Drafts are in scope: you invoked this on the PR you are sitting on, so it works
+the PR whether or not it is a draft (`isDraft` is reported so you can call it
+out). The never-rewrite-history rule below still holds regardless.
 
 ## Scan first (one read-only command)
 
@@ -199,7 +197,7 @@ and does not make the PR busy. You ack threads with `mark-seen.sh` (see check
 | Adding a temp worktree to do the work       | You are already on the PR's branch; fix in place                                                                              |
 | Rebase + force-with-lease on an approved PR | Ready PRs get merge commits or appended fixes                                                                                  |
 | Updating a behind-but-green branch          | No-conflict, green, no up-to-date gate = leave it                                                                              |
-| Nesting /monitor-pr or /babysit-prs         | Two loops fight over scheduling; this skill is the loop body                                                                   |
+| Nesting another PR-watching loop            | Two schedulers fight over the session wakeup; this skill is the loop body                                                      |
 | Replying to a human reviewer autonomously   | Draft + user approval first                                                                                                    |
 | Re-fetching PR/CI/thread state by hand      | The scanner already gathered it; read the digest                                                                               |
 | Re-triaging the same gate every tick        | Ack no-action threads with `mark-seen.sh`; `newThreads` drives `HAS_COMMENTS`                                                  |
