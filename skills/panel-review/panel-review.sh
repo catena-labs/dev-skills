@@ -849,7 +849,12 @@ build_argv() {
       # and would make opencode dump its --help and exit 1.
       local agent="$OPENCODE_AGENT"
       (( CHECKOUT_MODE )) && agent="$OPENCODE_AGENT_DEEP"
-      argv=("$bin" run --agent "$agent")
+      # --print-logs surfaces provider errors (usage-limit / rate-limit / auth) on
+      # stderr; without it opencode prints only its TUI banner, so a failed run
+      # looks like a silent empty timeout. --log-level ERROR keeps captured stderr
+      # concise. panelist_error_reason() greps these lines to tell the orchestrator
+      # *why* a panelist produced nothing.
+      argv=("$bin" run --agent "$agent" --print-logs --log-level ERROR)
       (( CHECKOUT_MODE )) && argv+=(--dangerously-skip-permissions)
       [[ -n "$model" ]] && argv+=(--model "$model")
       argv+=(-- "$prompt")
@@ -890,7 +895,9 @@ for p in "${PANEL_IDS[@]}"; do
 
   panel_cwd="$PWD"
   (( CHECKOUT_MODE )) && panel_cwd="$OUT_DIR/worktree-$p"
-  ( cd "$panel_cwd" && run_panelist "${argv[@]}" >"$out" 2>"$err"; echo $? >"$rc" ) &
+  # opencode `run` hangs at init on an open stdin (kevent64 wait); redirect from
+  # /dev/null so it proceeds. Harmless for codex/claude, which ignore stdin here.
+  ( cd "$panel_cwd" && run_panelist "${argv[@]}" </dev/null >"$out" 2>"$err"; echo $? >"$rc" ) &
   PIDS+=($!)
   echo "panel-review: ${p} started (pid=$!, cwd=$panel_cwd)" >&2
 done
@@ -949,6 +956,36 @@ extract_model_label() {
   fi
 }
 
+# Pull a one-line, human-readable failure reason out of a panelist's captured
+# stderr, so an empty/failed panelist reports *why* instead of just a bare exit
+# code. Order: opencode's structured provider error (logged as
+# `timestamp=... level=ERROR ... error.error="..."` when run with --print-logs,
+# see build_argv) -> a timeout note -> the last non-empty stderr line (where
+# codex/claude print their own error). The structured match is anchored to the
+# `^timestamp=...level=ERROR` log prefix so it cannot match an `error.error=`
+# string that a panelist merely *echoed* from the code under review.
+strip_ansi() { sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g'; }
+
+panelist_error_reason() {
+  local p="$1"
+  local rc_val="$2"
+  local errf="$OUT_DIR/$p.err"
+  local reason=""
+  if [[ -s "$errf" ]]; then
+    reason="$(grep -E '^timestamp=[^ ]* level=ERROR' "$errf" 2>/dev/null \
+              | grep -oE 'error\.error="[^"]*"' | tail -n1)"
+    reason="${reason#error.error=\"}"; reason="${reason%\"}"
+  fi
+  if [[ -z "$reason" && "$rc_val" == "124" ]]; then
+    reason="timed out (killed by timeout)"
+  fi
+  if [[ -z "$reason" && -s "$errf" ]]; then
+    reason="$(strip_ansi <"$errf" 2>/dev/null | grep -v '^[[:space:]]*$' \
+              | tail -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  fi
+  printf '%s' "${reason:-no output and no error detail captured}"
+}
+
 print_section() {
   local p="$1"
   local rc_val
@@ -960,14 +997,28 @@ print_section() {
   fallback_model="$(effective_model "$p")"
   local model_label
   model_label="$(extract_model_label "$p" "$fallback_model")"
+
+  # A panelist that exits non-zero OR produces no stdout has failed to deliver a
+  # review (the prompt mandates at least Model:/Goal:/Approach: or NO_FINDINGS).
+  # Treat both as failures so the run's exit code and the heartbeat stay honest —
+  # an empty panelist on exit 0 (e.g. a swallowed provider error) is the silent
+  # case this is meant to catch.
+  local empty=0
+  [[ -s "$OUT_DIR/$p.out" ]] || empty=1
+  local failed=0
+  { [[ "$rc_val" != "0" ]] || (( empty )); } && failed=1
+  local reason=""
+  (( failed )) && reason="$(panelist_error_reason "$p" "$rc_val")"
+
   echo "## ${p} / ${model_label} (exit ${rc_val})"
   echo
-  if [[ -s "$OUT_DIR/$p.out" ]]; then
-    cat "$OUT_DIR/$p.out"
+  if (( empty )); then
+    echo "_(no stdout — panelist produced no review)_"
+    [[ -n "$reason" ]] && { echo; echo "**Failure:** ${reason}"; }
   else
-    echo "_(no stdout)_"
+    cat "$OUT_DIR/$p.out"
   fi
-  if [[ "$rc_val" != "0" ]]; then
+  if (( failed )); then
     ANY_FAIL=1
     if [[ -s "$OUT_DIR/$p.err" ]]; then
       echo
@@ -981,7 +1032,18 @@ print_section() {
     fi
   fi
   echo
-  echo "panel-review: ${p} (${model_label}) done (exit ${rc_val})" >&2
+  # Keep the `done (exit N)` token intact — the panel-review and
+  # bot-panel-review-loop skills poll stderr for it to mark a panelist complete,
+  # so renaming it on failure would make the orchestrator wait forever. Append a
+  # FAILED suffix (reason truncated) instead, so an empty/errored panelist is
+  # loud rather than indistinguishable from a clean run.
+  local hb="panel-review: ${p} (${model_label}) done (exit ${rc_val})"
+  if (( failed )); then
+    local short="$reason"
+    [[ ${#short} -gt 120 ]] && short="${short:0:117}..."
+    hb="${hb} — FAILED: ${short}"
+  fi
+  echo "$hb" >&2
 }
 
 # Track which panelists have already been printed. Bash 3.2 (macOS default) has

@@ -161,13 +161,18 @@ When _not_ to use:
      list). On a `done`, set it to `completed`, post a single-line user-visible
      status that **includes the model** the panelist self-reported
      (`✓ <name> (<model>) done — N findings, top severity <SEV>` or
-     `✓ <name> (<model>) — NO_FINDINGS` / `✗ <name> (<model>) failed (exit N)`),
-     **and immediately post that panelist's full `## <name> / <model> (exit N)`
-     section to chat as soon as it appears in stdout**. Do not wait until every
-     panelist is done — surfacing each section the moment it lands gives the
-     user actionable findings 5–10 minutes before synthesis is possible. The
-     synthesis step still adds value by deduping / ranking across panelists; it
-     is not a substitute for the individual sections.
+     `✓ <name> (<model>) — NO_FINDINGS`). A panelist that failed — non-zero exit
+     **or** empty output (e.g. a provider quota / usage-limit / auth error, or a
+     timeout) — is reported by the script as `done (exit N) — FAILED: <reason>`;
+     surface it as `✗ <name> (<model>) FAILED (exit N): <reason>` and treat that
+     panelist as having contributed **nothing** — do not count it toward
+     consensus. **Immediately post that panelist's full
+     `## <name> / <model> (exit N)` section to chat as soon as it appears in
+     stdout**. Do not wait until every panelist is done — surfacing each section
+     the moment it lands gives the user actionable findings 5–10 minutes before
+     synthesis is possible. The synthesis step still adds value by deduping /
+     ranking across panelists; it is not a substitute for the individual
+     sections.
    - After the last `done` heartbeat, set `Synthesize findings` to
      `in_progress`, proceed to steps 7–8, then mark it `completed`.
 7. **Read the script's combined output** — it prints one section per panelist
