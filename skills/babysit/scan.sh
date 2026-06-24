@@ -83,8 +83,8 @@ IGNORE_LOGINS="${BABYSIT_IGNORE_LOGINS-catenabot}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repo) REPO="${2:-}"; shift 2 ;;
-    --pr) PR="${2:-}"; shift 2 ;;
+    --repo) [[ $# -ge 2 && -n "${2:-}" ]] || { echo "scan.sh: --repo requires owner/name" >&2; exit 2; }; REPO="$2"; shift 2 ;;
+    --pr) [[ $# -ge 2 && -n "${2:-}" ]] || { echo "scan.sh: --pr requires a PR number" >&2; exit 2; }; PR="$2"; shift 2 ;;
     --no-logs) INCLUDE_LOGS=0; shift ;;
     -h|--help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "scan.sh: unknown arg: $1" >&2; exit 2 ;;
@@ -124,6 +124,24 @@ log_excerpt_for_job() {
   printf '%s' "$excerpt" | head -c 2000
 }
 
+# Run a read-only gh data fetch and abort the whole scan if it fails, rather than
+# letting an auth / rate-limit / network / API error degrade to empty data and a
+# phantom GREEN_IDLE (a ~30-min nap on an unscanned PR). Stdout is the payload;
+# stderr is captured to $gherr and surfaced on failure. `gh pr checks` is handled
+# separately below — it exits non-zero on failing/pending checks, which is valid,
+# so it cannot use this all-or-nothing helper.
+gh_fetch() {
+  local label="$1"; shift
+  local out rc
+  out="$("$@" 2>"$gherr")"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "scan.sh: failed to fetch $label (gh exited $rc):" >&2
+    cat "$gherr" >&2
+    exit 1
+  fi
+  printf '%s' "$out"
+}
+
 # Resolve the ONE PR to work. With --pr N, that exact PR; otherwise the PR for
 # the current branch. Three outcomes are kept distinct — folding them all into
 # `2>/dev/null || pr=""` would turn an auth/network/API error into a silent
@@ -144,7 +162,8 @@ else
   view_cmd=(gh pr view "${view_args[@]}")
 fi
 pr_err="$(mktemp)"
-trap 'rm -f "$pr_err"' EXIT
+gherr="$(mktemp)"
+trap 'rm -f "$pr_err" "$gherr"' EXIT
 if pr="$("${view_cmd[@]}" 2>"$pr_err")"; then
   [[ "$(printf '%s' "$pr" | jq -r '.state')" == "OPEN" ]] || pr=""
 elif [[ -z "$PR" ]] && grep -qiE 'no .*pull requests? found' "$pr_err"; then
@@ -168,9 +187,21 @@ mergeable="$(printf '%s' "$pr" | jq -r '.mergeable')"
 mergestate="$(printf '%s' "$pr" | jq -r '.mergeStateStatus')"
 reviewdec="$(printf '%s' "$pr" | jq -r '.reviewDecision // ""')"
 
-# CI rollup. Keep stdout even on non-zero exit (failing/pending checks).
-checks="$(gh pr checks "$num" -R "$REPO" --json name,state,bucket,link 2>/dev/null)" || true
-[[ -z "$checks" ]] && checks="[]"
+# CI rollup. gh pr checks exits non-zero both for failing/pending checks (valid —
+# stdout is still a JSON array) and for real fetch errors (auth/network). Trust
+# any valid-JSON stdout regardless of exit; otherwise distinguish a benign "no
+# checks reported" (treat as no checks) from a real error, and abort on the
+# latter rather than misread an unscanned PR as GREEN_IDLE and nap.
+checks="$(gh pr checks "$num" -R "$REPO" --json name,state,bucket,link 2>"$gherr")" || true
+if ! printf '%s' "$checks" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  if grep -qiE 'no checks? (reported|found)' "$gherr"; then
+    checks="[]"   # PR has no checks configured — nothing failing
+  else
+    echo "scan.sh: failed to fetch CI checks via 'gh pr checks':" >&2
+    cat "$gherr" >&2
+    exit 1
+  fi
+fi
 ci="$(printf '%s' "$checks" | jq '{
   passed:  [.[] | select(.bucket=="pass")]    | length,
   failed:  [.[] | select(.bucket=="fail")]    | length,
@@ -185,7 +216,7 @@ ci="$(printf '%s' "$checks" | jq '{
 # first:100 (not inner-paginated) — an accepted cap, since a single inline thread
 # with >100 comments is unrealistic; the representative-comment pick below would
 # then only consider the first 100.
-threads="$(gh api graphql --paginate \
+threads_raw="$(gh_fetch "review threads" gh api graphql --paginate \
   -f query='
     query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
       repository(owner: $owner, name: $repo) {
@@ -206,8 +237,8 @@ threads="$(gh api graphql --paginate \
         }
       }
     }
-  ' -f owner="$OWNER" -f repo="$NAME" -F pr="$num" 2>/dev/null \
-  | jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]?]')" || threads="[]"
+  ' -f owner="$OWNER" -f repo="$NAME" -F pr="$num")"
+threads="$(printf '%s' "$threads_raw" | jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]?]')"
 [[ -z "$threads" ]] && threads="[]"
 
 # One object per unresolved, not-outdated thread whose last NON-bot, NON-ignored
@@ -258,8 +289,8 @@ newthreads="$(printf '%s' "$threads_full" | jq '[.[] | select(.seen == false) | 
 # accounts, and any login in IGNORE_LOGINS; tag the rest with a seen-ledger sig
 # ("r"+comment id) and split new vs already-acked, mirroring threads. Bodies are
 # omitted on purpose — the agent fetches them for just the unseen ids.
-root_raw="$(gh api --paginate "repos/$REPO/issues/$num/comments" 2>/dev/null \
-  | jq -s '[.[][]?]')" || root_raw="[]"
+root_raw="$(gh_fetch "root comments" gh api --paginate "repos/$REPO/issues/$num/comments")"
+root_raw="$(printf '%s' "$root_raw" | jq -s '[.[][]?]')"
 [[ -z "$root_raw" ]] && root_raw="[]"
 root_full="$(printf '%s' "$root_raw" | jq \
   --arg author "$author" --argjson ledger "$ledger" --arg ignore "$IGNORE_LOGINS" '
@@ -286,8 +317,8 @@ rootnew="$(printf '%s' "$root_full" | jq '[.[] | select(.seen == false) | del(.s
 # non-ignored reviewers; sig is "v"+<review id>, split new vs already-acked like
 # the other channels. State is carried so triage can read APPROVED-with-body as a
 # likely dismiss without re-fetching.
-reviews_raw="$(gh api --paginate "repos/$REPO/pulls/$num/reviews" 2>/dev/null \
-  | jq -s '[.[][]?]')" || reviews_raw="[]"
+reviews_raw="$(gh_fetch "review summaries" gh api --paginate "repos/$REPO/pulls/$num/reviews")"
+reviews_raw="$(printf '%s' "$reviews_raw" | jq -s '[.[][]?]')"
 [[ -z "$reviews_raw" ]] && reviews_raw="[]"
 reviews_full="$(printf '%s' "$reviews_raw" | jq \
   --arg author "$author" --argjson ledger "$ledger" --arg ignore "$IGNORE_LOGINS" '

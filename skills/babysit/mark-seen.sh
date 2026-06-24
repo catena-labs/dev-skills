@@ -27,9 +27,9 @@ sigs=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repo) REPO="${2:-}"; shift 2 ;;
-    --verdict) VERDICT="${2:-}"; shift 2 ;;
-    --note) NOTE="${2:-}"; shift 2 ;;
+    --repo) [[ $# -ge 2 && -n "${2:-}" ]] || { echo "mark-seen.sh: --repo requires owner/name" >&2; exit 2; }; REPO="$2"; shift 2 ;;
+    --verdict) [[ $# -ge 2 && -n "${2:-}" ]] || { echo "mark-seen.sh: --verdict requires a value" >&2; exit 2; }; VERDICT="$2"; shift 2 ;;
+    --note) [[ $# -ge 2 ]] || { echo "mark-seen.sh: --note requires a value" >&2; exit 2; }; NOTE="$2"; shift 2 ;;
     -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; while [[ $# -gt 0 ]]; do sigs+=("$1"); shift; done ;;
     -*) echo "mark-seen.sh: unknown arg: $1" >&2; exit 2 ;;
@@ -67,14 +67,24 @@ printf '%s' "$ledger" | jq -e 'type == "object"' >/dev/null 2>&1 || ledger="{}"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sigs_json="$(printf '%s\n' "${sigs[@]}" | jq -R . | jq -s 'unique')"
 
+# Fail loudly rather than fall through to the success message: without set -e, a
+# broken jq would otherwise blank the ledger (losing every prior ack), and a
+# failed write/mv would silently drop this ack while reporting success — and
+# scan.sh would keep re-surfacing the threads the agent thinks it just acked.
 updated="$(printf '%s' "$ledger" | jq \
   --argjson sigs "$sigs_json" \
   --arg verdict "$VERDICT" \
   --arg note "$NOTE" \
   --arg now "$now" '
-  reduce $sigs[] as $s (.; .[$s] = {verdict: $verdict, note: $note, markedAt: $now})')"
+  reduce $sigs[] as $s (.; .[$s] = {verdict: $verdict, note: $note, markedAt: $now})')" \
+  || { echo "mark-seen.sh: failed to build updated ledger JSON" >&2; exit 1; }
 
 # Same-dir temp + mv so the write is atomic (no torn ledger on crash).
-tmp="$(mktemp "$STATE_DIR/.ledger.XXXXXX")"
-printf '%s\n' "$updated" > "$tmp" && mv "$tmp" "$LEDGER"
+tmp="$(mktemp "$STATE_DIR/.ledger.XXXXXX")" \
+  || { echo "mark-seen.sh: failed to create temp ledger file" >&2; exit 1; }
+if ! printf '%s\n' "$updated" > "$tmp" || ! mv "$tmp" "$LEDGER"; then
+  rm -f "$tmp"
+  echo "mark-seen.sh: failed to write ledger to $LEDGER" >&2
+  exit 1
+fi
 echo "mark-seen.sh: recorded $(printf '%s' "$sigs_json" | jq 'length') sig(s) in $LEDGER" >&2
