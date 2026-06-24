@@ -842,7 +842,9 @@ for p in "${PANEL_IDS[@]}"; do
 
   panel_cwd="$PWD"
   (( CHECKOUT_MODE )) && panel_cwd="$OUT_DIR/worktree-$p"
-  ( cd "$panel_cwd" && run_panelist "${argv[@]}" >"$out" 2>"$err"; echo $? >"$rc" ) &
+  # opencode `run` hangs at init on an open stdin (kevent64 wait); redirect from
+  # /dev/null so it proceeds. Harmless for codex/claude, which ignore stdin here.
+  ( cd "$panel_cwd" && run_panelist "${argv[@]}" </dev/null >"$out" 2>"$err"; echo $? >"$rc" ) &
   PIDS+=($!)
   echo "panel-review: ${p} started (pid=$!, cwd=$panel_cwd)" >&2
 done
