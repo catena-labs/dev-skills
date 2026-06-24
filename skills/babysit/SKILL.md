@@ -63,25 +63,29 @@ report and sleep `suggestedDelaySeconds`. Otherwise act when the `bucket` is not
 hint built from the raw fields, which stay in the object; trust your judgment
 over the label when they disagree.
 
-**Seen-ledger.** `HAS_COMMENTS` fires on `newThreads` (threads not yet acked),
-not on total `unresolvedThreads`, so a comment you have already triaged and
-acked never re-surfaces — that is the whole point of the split. `threads`
-carries only the **unseen** ones (no bodies; fetch those yourself for just
-these), each tagged with the GraphQL `threadId` you need to resolve it (check
-3). Each thread's `sig` is `"c"+<last-comment id>`, so a later reviewer reply
-mints a new sig and the thread re-surfaces on its own. The scanner reads **two**
-comment channels: inline review `threads` and root-level PR conversation
-comments (`rootComments`) — the latter is where a reviewer drops a finding on a
-line outside the diff, which the inline-thread query never sees. `rootComments`
-behaves exactly like `threads` (sig `"r"+<comment id>`, unseen-only, no bodies),
-drives `HAS_COMMENTS` via `newRootComments`, and counts acked ones in
-`standingRootGates`. Author comments, `[bot]` accounts, and (by default)
-catena's review bot `catenabot` are filtered out; adjust the extra-login filter
-via `BABYSIT_IGNORE_LOGINS=foo,bar` (set it empty to clear). `standingGates` is
-a cheap count of already-acked threads still open on the PR: mention it in the
-report as a one-liner (`3 known gates, unchanged`) but it is **not** actionable
-and does not make the PR busy. You ack threads with `mark-seen.sh` (see check
-3); it is the ledger's only writer.
+**Seen-ledger.** The split into _new_ (unacked) and _standing_ (acked) is the
+whole point: `HAS_COMMENTS` fires on `newThreads`/`newRootComments`, never on
+the total `unresolvedThreads`, so a comment you have already triaged never
+re-surfaces.
+
+- **Two channels, same shape.** Inline review `threads` and root-level
+  `rootComments` — the latter catches a finding a reviewer drops on a line
+  outside the diff, which the inline-thread query never sees. Both arrays carry
+  only the **unseen** items, no bodies (fetch those yourself for just these);
+  inline threads also carry the GraphQL `threadId` you pass to resolve them
+  (check 3).
+- **Sigs self-heal.** Inline sig is `"c"+<last-comment id>`, root is
+  `"r"+<comment id>` — so a later reviewer reply mints a new sig and the item
+  re-surfaces on its own.
+- **Standing gates are noise, not work.** Already-acked-but-open items
+  (`standingGates` / `standingRootGates`) get a one-liner in the report
+  (`3 known gates, unchanged`) but are **not** actionable and never make the PR
+  busy.
+- **Filtering.** Author comments, `[bot]` accounts, and (by default) catena's
+  review bot `catenabot` are dropped; adjust via `BABYSIT_IGNORE_LOGINS=foo,bar`
+  (set it empty to clear).
+- **Only `mark-seen.sh` writes the ledger** (see check 3); `scan.sh` only reads
+  it.
 
 | bucket         | route to                                          |
 | -------------- | ------------------------------------------------- |
