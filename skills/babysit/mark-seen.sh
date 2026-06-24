@@ -3,9 +3,10 @@
 #
 # Records review-thread signatures the agent has triaged to a no-further-action
 # verdict (human-review gate, won't-fix, deferred-to-user, handled-elsewhere) so
-# scan.sh stops re-surfacing them. The signature is "c"+<last-comment id>, so a
-# later reviewer reply mints a new sig and the thread re-surfaces on its own — an
-# ack silences the thread as it stands now, not forever.
+# scan.sh stops re-surfacing them. An inline signature is "c"+<id of the
+# thread's last non-bot, non-ignored comment>, so a later reviewer reply mints a
+# new sig and the thread re-surfaces on its own (a trailing bot reply does not) —
+# an ack silences the thread as it stands now, not forever.
 #
 # Pass sigs straight from scan.sh's per-PR `threads[].sig`; never hand-compute
 # them. Threads you intend to FIX should NOT be acked — leave them so they keep
@@ -29,7 +30,7 @@ while [[ $# -gt 0 ]]; do
     --repo) REPO="${2:-}"; shift 2 ;;
     --verdict) VERDICT="${2:-}"; shift 2 ;;
     --note) NOTE="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; while [[ $# -gt 0 ]]; do sigs+=("$1"); shift; done ;;
     -*) echo "mark-seen.sh: unknown arg: $1" >&2; exit 2 ;;
     *) sigs+=("$1"); shift ;;

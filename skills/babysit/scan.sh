@@ -19,7 +19,7 @@
 #        "number", "title", "branch", "isDraft",
 #        "mergeable", "mergeState", "reviewDecision",
 #        "ci": { "passed", "failed", "pending", "failing": [ {name, link} ] },
-#        "unresolvedThreads": int,     // non-author, unresolved, not-outdated (total)
+#        "unresolvedThreads": int,     // unresolved, not-outdated, last non-bot/non-ignored comment is a reviewer (total)
 #        "newThreads": int,            // of those, NOT yet in the seen-ledger
 #        "standingGates": int,         // of those, already acked (silenced, unchanged)
 #        "threads": [ {sig, threadId, path, line, lastAuthor, at} ],  // the unseen ones only
@@ -45,10 +45,11 @@
 # whose feedback lives in the top-level body with no inline/root comment — the
 # inline-thread query sees neither. All three feed HAS_COMMENTS.
 #
-# Seen-ledger: an inline thread's `sig` is "c"+<last-comment id>, a root
-# comment's `sig` is "r"+<comment id>, and a review summary's `sig` is
-# "v"+<review id>, so a reviewer reply or new review (new id) mints a fresh sig
-# and re-surfaces the item. mark-seen.sh (the only writer) records sigs the agent
+# Seen-ledger: an inline thread's `sig` is "c"+<id of its last non-bot,
+# non-ignored comment> (a reviewer's, for any surfaced thread), a root comment's
+# `sig` is "r"+<comment id>, and a review summary's `sig` is "v"+<review id>, so
+# a reviewer reply or new review (new id) mints a fresh sig and re-surfaces the
+# item — while a trailing bot reply does not. mark-seen.sh (the only writer) records sigs the agent
 # triaged to a no-further-action verdict; this scanner only READS the ledger to
 # split new items from standing (acked) ones. HAS_COMMENTS fires on newThreads,
 # newRootComments, or newReviewComments, so once every item is acked the PR goes
@@ -178,8 +179,12 @@ ci="$(printf '%s' "$checks" | jq '{
 }')"
 
 # Unresolved review threads whose last comment is from someone other than the
-# author. This is a routing signal only; triage-pr-comments does the precise
-# Fix/Dismiss filtering (bots, already-replied, etc.) once the agent acts.
+# author (and not a bot / ignored login — see the filter below). This is a
+# routing signal only; triage-pr-comments does the precise Fix/Dismiss filtering
+# (already-replied, etc.) once the agent acts. Each thread's comments are fetched
+# first:100 (not inner-paginated) — an accepted cap, since a single inline thread
+# with >100 comments is unrealistic; the representative-comment pick below would
+# then only consider the first 100.
 threads="$(gh api graphql --paginate \
   -f query='
     query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
@@ -194,7 +199,7 @@ threads="$(gh api graphql --paginate \
               path
               line
               comments(first: 100) {
-                nodes { databaseId author { login } createdAt }
+                nodes { databaseId author { login __typename } createdAt }
               }
             }
           }
@@ -205,18 +210,42 @@ threads="$(gh api graphql --paginate \
   | jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]?]')" || threads="[]"
 [[ -z "$threads" ]] && threads="[]"
 
-# One object per non-author, unresolved, not-outdated thread, tagged with its
-# seen-ledger signature ("c"+last-comment id) and whether that sig is acked.
-threads_full="$(printf '%s' "$threads" | jq --arg author "$author" --argjson ledger "$ledger" '
-  [ .[]
-    | select(.isResolved == false and .isOutdated == false)
-    | (.comments.nodes | last) as $last
-    | select($last != null and $last.databaseId != null and $last.author.login != $author)
-    | ("c" + ($last.databaseId | tostring)) as $sig
-    | { sig: $sig, threadId: .id, path: .path, line: .line,
-        lastAuthor: $last.author.login, at: $last.createdAt,
-        seen: ($ledger | has($sig)) }
-  ]')"
+# One object per unresolved, not-outdated thread whose last NON-bot, NON-ignored
+# comment is from someone other than the author — i.e. a reviewer has the last
+# real word and the author has not yet responded. That single representative
+# comment (`$last` below) carries the seen-ledger signature ("c"+its id), the
+# timestamp, and the author shown; whether its sig is acked splits new vs
+# standing. Keying everything to the last real comment — skipping trailing bot /
+# IGNORE_LOGINS chatter — is what makes all the cases line up:
+#   - pure bot thread (e.g. coderabbitai): no real comment, dropped — otherwise
+#     it routes HAS_COMMENTS every tick until manually acked;
+#   - human thread, bot replies last: the reviewer comment is still the last real
+#     one, so it stays visible and reaches triage;
+#   - author replied after the reviewer: the author is the last real comment,
+#     dropped — the agent already answered, re-surfacing risks a duplicate reply;
+#   - a genuinely new reviewer reply mints a fresh sig and re-surfaces; a later
+#     bot or author reply does not churn it.
+# This mirrors the bot / IGNORE_LOGINS drop and the sig-keyed-to-the-passing-
+# comment shape of the root and review channels below (and the documented
+# Filtering behavior).
+threads_full="$(printf '%s' "$threads" | jq \
+  --arg author "$author" --argjson ledger "$ledger" --arg ignore "$IGNORE_LOGINS" '
+  ($ignore | split(",") | map(select(. != ""))) as $ignored
+  | [ .[]
+      | select(.isResolved == false and .isOutdated == false)
+      | ( [ .comments.nodes[]
+            | (.author.login // "") as $cl
+            | select(((.author.__typename // "") != "Bot")
+                     and (($ignored | index($cl)) | not)) ]
+          | last ) as $last
+      | select($last != null
+               and $last.databaseId != null
+               and ($last.author.login // "") != $author)
+      | ("c" + ($last.databaseId | tostring)) as $sig
+      | { sig: $sig, threadId: .id, path: .path, line: .line,
+          lastAuthor: ($last.author.login // ""), at: $last.createdAt,
+          seen: ($ledger | has($sig)) }
+    ]')"
 unresolved="$(printf '%s' "$threads_full" | jq 'length')"
 newcount="$(printf '%s' "$threads_full" | jq '[.[] | select(.seen == false)] | length')"
 standing="$(printf '%s' "$threads_full" | jq '[.[] | select(.seen == true)] | length')"

@@ -42,7 +42,7 @@ and emits one compact JSON digest:
     "number", "title", "branch", "isDraft",
     "mergeable", "mergeState", "reviewDecision",
     "ci": { "passed", "failed", "pending", "failing": [{ "name", "link" }] },
-    "unresolvedThreads": 0,         // non-author, unresolved, not-outdated (total)
+    "unresolvedThreads": 0,         // unresolved, not-outdated, last non-bot/non-ignored comment is a reviewer (total)
     "newThreads": 0,                // of those, NOT yet acked in the seen-ledger
     "standingGates": 0,             // of those, already acked (silenced, unchanged)
     "threads": [{ "sig", "threadId", "path", "line", "lastAuthor", "at" }],  // the unseen inline ones only
@@ -80,9 +80,11 @@ whole point: `HAS_COMMENTS` fires on
   for just these); inline threads also carry the GraphQL `threadId` you pass to
   resolve them (check 3), and review summaries carry their `state` so an
   `APPROVED`-with-body reads as a likely dismiss.
-- **Sigs self-heal.** Inline sig is `"c"+<last-comment id>`, root is
-  `"r"+<comment id>`, review summary is `"v"+<review id>` — so a later reviewer
-  reply or new review mints a new sig and the item re-surfaces on its own.
+- **Sigs self-heal.** Inline sig is
+  `"c"+<id of the thread's last non-bot, non-ignored comment>` (a reviewer's),
+  root is `"r"+<comment id>`, review summary is `"v"+<review id>` — so a later
+  reviewer reply or new review mints a new sig and the item re-surfaces on its
+  own (a trailing bot reply does not).
 - **Standing gates are noise, not work.** Already-acked-but-open items
   (`standingGates` / `standingRootGates`) get a one-liner in the report
   (`3 known gates, unchanged`) but are **not** actionable and never make the PR
@@ -187,8 +189,9 @@ whole point: `HAS_COMMENTS` fires on
 - The seen-ledger lives at
   `${XDG_STATE_HOME:-$HOME/.local/state}/babysit/<owner>-<name>.json` and is
   written **only** by `mark-seen.sh`. `scan.sh` reads it; nothing else touches
-  it. Keyed by last-comment id, so it never hides a thread a reviewer has since
-  replied to.
+  it. Each entry is keyed by the id of the comment/review its sig names — for an
+  inline thread, the last non-bot/non-ignored comment — so it never hides a
+  thread a reviewer has since replied to.
 
 ## Pacing and model (when driven by /loop)
 
