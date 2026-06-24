@@ -112,6 +112,11 @@ panel_approach() { local i; i="$(panel_index "$1")" || return 1; printf '%s' "${
 # therefore "drop a file in prompts/approaches/" — no code change.
 validate_approach() {
   local a="$1" ctx="$2"
+  # Constrain to a safe basename: no '/' means the value can never traverse out
+  # of $APPROACHES_DIR (line ~819 cat) or smuggle a path separator into the
+  # panelist id (register_panelist) it's later folded into.
+  [[ "$a" =~ ^[A-Za-z0-9._-]+$ ]] || \
+    die "invalid approach '$a'${ctx:+ in $ctx} (allowed: letters, numbers, . _ -)"
   [[ -f "$APPROACHES_DIR/$a.md" ]] || die "unknown approach '$a'${ctx:+ in $ctx} (no prompts/approaches/$a.md)"
 }
 
