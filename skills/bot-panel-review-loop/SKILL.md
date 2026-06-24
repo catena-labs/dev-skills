@@ -192,9 +192,9 @@ bash <skill-dir>/pr-actions.sh react {number}    # adds 👀
 ```
 
 Then invoke the **`panel-review`** skill via the Skill tool, targeting the PR
-with the decompose approach turned on
-(`/panel-review --pr {number} --approach decompose`), with one overriding
-instruction:
+with the decompose approach turned on and the panel pinned to `codex` + `claude`
+(`/panel-review --pr {number} --approach decompose --panelist codex --panelist claude`),
+with one overriding instruction:
 
 > **Gather-only. Do NOT modify the working tree; do not edit, commit, or push.**
 
@@ -211,10 +211,13 @@ below).
 
 **Record the panel composition.** `panel-review` emits one
 `panel-review: <name> (<model>) done (exit N)` heartbeat per panelist; collect
-the `<name> (<model>)` pairs that actually ran. Don't assume a fixed roster —
-`panel-review` auto-detects whichever supported CLIs are on `PATH`, so a missing
-one silently shrinks the panel; record what the heartbeats report, not a
-hardcoded list. Every panelist ran the decompose approach (you passed
+the `<name> (<model>)` pairs that actually ran. The panel is `codex` + `claude`
+(two strong, independent models — the right roster for an autonomous,
+high-volume sweep). Even with the roster pinned, don't assume both ran: a CLI
+missing from `PATH` silently shrinks the panel, so record what the heartbeats
+actually report — and treat any `done (exit N) — FAILED: …` heartbeat as a
+panelist that did **not** contribute (non-zero exit or empty output), not a
+clean review. Every panelist ran the decompose approach (you passed
 `--approach decompose`), so note that on the Panel line. Depth scales with panel
 breadth (how many models ran) and the decompose approach, never with rounds (a
 `--pr` review is one pass). If only one panelist ran, say so in the summary — a

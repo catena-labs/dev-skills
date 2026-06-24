@@ -35,9 +35,10 @@ loop indefinitely.
 - `--dependabot` — include Dependabot PRs (default: skip them).
 
 Every PR is reviewed at the same depth — there is no depth flag. Each review
-runs `panel-review` with `--approach decompose`, so every panelist reviews by
-chunking the diff plus a cross-boundary seam pass instead of one whole-diff
-skim. It self-scales with diff size, so small PRs stay cheap.
+runs `panel-review` with
+`--approach decompose --panelist codex --panelist claude`, so every panelist
+reviews by chunking the diff plus a cross-boundary seam pass instead of one
+whole-diff skim. It self-scales with diff size, so small PRs stay cheap.
 
 Already-approved PRs are reviewed by default (the engagement marker still keeps
 it from re-reviewing one at the same head).
@@ -107,6 +108,6 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   approach makes each panelist's review more thorough (and slower) but adds no
   extra processes. Concurrency is bounded to a few PRs at a time; a busy repo
   sweep still takes a while.
-- **A thin panel is possible.** `panel-review` uses whichever of `codex`,
-  `claude`, and `opencode` are on `PATH`; a missing CLI silently shrinks the
-  panel, and the summary's **Panel** line flags it.
+- **A thin panel is possible.** The panel is `codex` + `claude`; a CLI missing
+  from `PATH`, or one that returns a `done (exit N) — FAILED: …` heartbeat,
+  silently shrinks the panel, and the summary's **Panel** line flags it.

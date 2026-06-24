@@ -84,7 +84,11 @@ When _not_ to use:
      heartbeat; post a one-line status including the self-reported model
      (`✓ codex (gpt-5.5) — N findings, M open questions`); and **stream each
      panelist's full `## <name> / <model>` section to chat the moment it
-     lands**.
+     lands**. A panelist that failed — non-zero exit **or** empty output (e.g. a
+     provider quota / usage-limit / auth error, or a timeout) — is reported by
+     the script as `done (exit N) — FAILED: <reason>`; surface it as
+     `✗ <name> (<model>) FAILED (exit N): <reason>` and treat that panelist as
+     having contributed **nothing**.
    - **If you cannot use `run_in_background` / `BashOutput` is unavailable in
      this harness:** run the script in the **foreground** with `timeout: 600000`
      (10 min) — the default 2-minute Bash timeout will kill the call before
