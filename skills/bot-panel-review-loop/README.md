@@ -35,10 +35,15 @@ loop indefinitely.
 - `--dependabot` — include Dependabot PRs (default: skip them).
 
 Every PR is reviewed at the same depth — there is no depth flag. Each review
-runs `panel-review` with
-`--approach decompose --panelist codex --panelist claude`, so every panelist
-reviews by chunking the diff plus a cross-boundary seam pass instead of one
-whole-diff skim. It self-scales with diff size, so small PRs stay cheap.
+runs `panel-review --approach decompose`, so every panelist reviews by chunking
+the diff plus a cross-boundary seam pass instead of one whole-diff skim. It
+self-scales with diff size, so small PRs stay cheap.
+
+This skill does not pick the panel — it passes no `--panelist` flag, so
+composition is whatever `panel-review` resolves. The roster is currently `codex`
+and `claude`, set via the `PANEL_REVIEW_PANELISTS` env var (the rate-limited
+opencode panelist is dropped); see `OPERATING.md` for how to set it and the rest
+of the operating model.
 
 Already-approved PRs are reviewed by default (the engagement marker still keeps
 it from re-reviewing one at the same head).
@@ -82,7 +87,9 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   else — the findings lists and a human-review note for sensitive surfaces
   (auth, money movement, schema, secrets) — folds into collapsible `<details>`
   sections. It then swaps its 👀 reaction to 🚀 on an approve verdict (leaving
-  👀 when it left comments).
+  👀 when it left comments). On a re-review that downgrades a prior approve, it
+  also clears the now-stale 🚀 so the reaction never advertises a withdrawn
+  approval.
 - **Tracks engagement (NEW / UPDATED / SEEN)** via a marker comment, so it
   re-reviews the whole PR only when it has new commits and never re-posts an
   inline finding already on the PR. Each review still leaves a fresh summary
@@ -106,8 +113,11 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
 - **Each actionable PR costs a full fan-out.** A per-PR agent runs
   `panel-review` (multiple CLI agents, minutes of wall clock); the `decompose`
   approach makes each panelist's review more thorough (and slower) but adds no
-  extra processes. Concurrency is bounded to a few PRs at a time; a busy repo
-  sweep still takes a while.
-- **A thin panel is possible.** The panel is `codex` + `claude`; a CLI missing
-  from `PATH`, or one that returns a `done (exit N) — FAILED: …` heartbeat,
-  silently shrinks the panel, and the summary's **Panel** line flags it.
+  extra processes. Concurrency is a loose cap of 3 reviews in flight, checked
+  only at dispatch and tracked across `/loop` ticks; a busy repo sweep still
+  takes a while. See `OPERATING.md` for the in-flight-tracking and top-up model.
+- **A thin panel is possible.** The panel is `codex` + `claude` (set via the
+  `PANEL_REVIEW_PANELISTS` env var, not pinned in this skill); a CLI missing
+  from `PATH`, a changed env var, or one that returns a
+  `done (exit N) — FAILED: …` heartbeat silently shrinks the panel, and the
+  summary's **Panel** line flags it.

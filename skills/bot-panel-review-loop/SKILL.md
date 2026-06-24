@@ -137,16 +137,34 @@ pin one; the judgment (which findings are real, the verdict) wants the strong
 model. The subagent doesn't load this skill, so **pass it the absolute path to
 `pr-actions.sh`** (the same `<skill-dir>` from Step 1) along with the brief.
 
-**Bound concurrency to 2-3 PRs at a time.** Each review runs `panel-review.sh`,
-which materializes one throwaway git worktree _per panelist_ under a `mktemp`
-dir pinned to the PR head. Those linked worktrees share this repo's single
-`.git`, so fanning out every PR at once means (PRs x panelists) concurrent
-`git worktree add`/`remove` racing on `.git/worktrees` and index/config locks.
-Dispatch in small batches (or sequentially if a batch errors on a git lock) —
-fresh-context-per-PR is the goal, not maximum parallelism. The decompose
-approach (Step 4a) doesn't change this bound: it makes each existing panelist's
-single review more thorough (a longer prompt, more wall-clock per panelist) —
-not extra processes or worktrees.
+**Concurrency: a loose cap of 3 reviews in flight, checked only at dispatch.**
+Do not start a new review if 3 are already running; never kill or interrupt an
+in-flight one to honor the cap. Each review runs `panel-review.sh`, which
+materializes one throwaway git worktree _per panelist_ under a `mktemp` dir
+pinned to the PR head. Those linked worktrees share this repo's single `.git`,
+so every concurrent review multiplies `git worktree add`/`remove` contention on
+`.git/worktrees` and the index/config locks; at cap 3 a panel can occasionally
+produce no output (an empty out-dir) under that contention. The cap is "loose"
+for exactly this reason — throughput traded against a small silent-failure risk
+— so on each sweep sanity-check that every in-flight panel still has a live
+process or a non-empty out-dir, and re-dispatch any silent miss. The decompose
+approach (Step 4a) doesn't change the bound: it makes each existing panelist's
+single review more thorough (a longer prompt, more wall-clock per panelist), not
+extra processes or worktrees.
+
+**Track the in-flight set across ticks and top up.** Dispatch each PR's review
+as a background sub-agent and keep a `{PR number -> sub-agent id}` map. The Step
+1 prefilter cannot tell you what is mid-review: a PR being reviewed still shows
+NEW/UPDATED because its new `head=` marker is not posted until the review
+finishes, so without this map the next tick re-dispatches a PR already in
+flight. Each tick, exclude the in-flight PRs from the actionable list, dispatch
+up to `available = 3 - len(in_flight)` of the rest, and drop a PR from the map
+when its agent reports completion (which also frees a slot and wakes the loop).
+**A resting sub-agent is usually slow, not dead** — decompose panels take ~10-15
+min — so WAIT for it to self-resume rather than re-dispatching; check the PR's
+live state (latest summary marker, reactions) before ever re-dispatching, or you
+race a duplicate panel and a duplicate summary. The full cross-tick operating
+model lives in `OPERATING.md` in this directory.
 
 The skill never checks out a PR into your working tree; the diff arrives over
 the GitHub API via `gh`, so nothing here scales with PR size. The review path
@@ -192,9 +210,9 @@ bash <skill-dir>/pr-actions.sh react {number}    # adds 👀
 ```
 
 Then invoke the **`panel-review`** skill via the Skill tool, targeting the PR
-with the decompose approach turned on and the panel pinned to `codex` + `claude`
-(`/panel-review --pr {number} --approach decompose --panelist codex --panelist claude`),
-with one overriding instruction:
+with the decompose approach turned on
+(`/panel-review --pr {number} --approach decompose`), with one overriding
+instruction:
 
 > **Gather-only. Do NOT modify the working tree; do not edit, commit, or push.**
 
@@ -211,17 +229,20 @@ below).
 
 **Record the panel composition.** `panel-review` emits one
 `panel-review: <name> (<model>) done (exit N)` heartbeat per panelist; collect
-the `<name> (<model>)` pairs that actually ran. The panel is `codex` + `claude`
-(two strong, independent models — the right roster for an autonomous,
-high-volume sweep). Even with the roster pinned, don't assume both ran: a CLI
-missing from `PATH` silently shrinks the panel, so record what the heartbeats
-actually report — and treat any `done (exit N) — FAILED: …` heartbeat as a
-panelist that did **not** contribute (non-zero exit or empty output), not a
-clean review. Every panelist ran the decompose approach (you passed
-`--approach decompose`), so note that on the Panel line. Depth scales with panel
-breadth (how many models ran) and the decompose approach, never with rounds (a
-`--pr` review is one pass). If only one panelist ran, say so in the summary — a
-single panelist is a thinner signal than a true multi-model panel.
+the `<name> (<model>)` pairs that actually ran. **This skill does not pick the
+panel** — it passes no `--panelist` flag, so composition is whatever
+`panel-review` resolves: governed by the `PANEL_REVIEW_PANELISTS` env var, set
+to `codex claude` for this sweep so the rate-limited opencode panelist is
+dropped (see "Panel composition" in `OPERATING.md`). Never assume the roster: a
+CLI missing from `PATH`, a changed env var, or a failed panelist silently
+shrinks the panel, so record what the heartbeats actually report — and treat any
+`done (exit N) — FAILED: …` heartbeat as a panelist that did **not** contribute
+(non-zero exit or empty output), not a clean review. Every panelist ran the
+decompose approach (you passed `--approach decompose`), so note that on the
+Panel line. Depth scales with panel breadth (how many models ran) and the
+decompose approach, never with rounds (a `--pr` review is one pass). If only one
+panelist ran, say so in the summary — a single panelist is a thinner signal than
+a true multi-model panel.
 
 **Verify before you stand on a finding.** Review depth comes from the panel
 itself now — multiple models, each reviewing with the decompose approach — so
@@ -472,6 +493,14 @@ So the reaction alone tells a watcher the outcome: 🚀 = approved, 👀 = comme
 worth addressing. Reactions dedupe per actor+content, so the swap is idempotent
 on an UPDATED re-review.
 
+**Stale 🚀 on a re-review that downgrades.** A PR can be approved (🚀), then the
+author pushes again and it re-surfaces as UPDATED at a new head still carrying
+the 🚀 from the old head. If the new verdict stays approve, the 🚀 is correct
+and re-posting it is a dedup no-op. If it **downgrades** to do-not-approve,
+`settle comments` clears that stale 🚀 for you — it deletes the bot's own rocket
+and leaves the 👀 — so the reaction never advertises a withdrawn approval (no
+manual `gh api -X DELETE` needed).
+
 Return to the sweep:
 `#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+...; approach: decompose] [human-review: {surfaces or none}]`.
 The trailing tags let the sweep show panel breadth and the human-review flag
@@ -509,7 +538,11 @@ new and updated PRs picked up promptly and catches CI as it goes green. Use
 so each tick stays cache-warm, whereas 300s pays a cache miss without buying a
 longer wait. Only stretch past this (toward `1200s`+) if you have a specific
 reason to back off and the user has not asked for the 5-minute default. Inherit
-the session model; never pin one.
+the session model; never pin one. A sub-agent completion also wakes the loop
+immediately and frees a slot, so the 270s timer is just the steady heartbeat
+between them; carry the in-flight `{PR -> agent id}` set and the loose cap of 3
+across ticks (Step 4). `OPERATING.md` in this directory is the full cross-tick
+operating model.
 
 `/loop` keeps one continuous context — tokens accumulate across ticks and only
 shrink via auto-compaction. This skill keeps the main context tiny anyway (heavy
