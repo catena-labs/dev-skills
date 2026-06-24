@@ -234,7 +234,9 @@ for p in "${PANELISTS[@]}"; do
     continue
   fi
 
-  ( run_panelist "${argv[@]}" >"$out" 2>"$err"; echo $? >"$rc" ) &
+  # opencode `run` hangs at init on an open stdin (kevent64 wait); redirect from
+  # /dev/null so it proceeds. Harmless for codex/claude, which ignore stdin here.
+  ( run_panelist "${argv[@]}" </dev/null >"$out" 2>"$err"; echo $? >"$rc" ) &
   PIDS+=($!)
   echo "panel-plan: ${p} started (pid=$!)" >&2
 done
