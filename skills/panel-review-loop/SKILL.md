@@ -107,9 +107,6 @@ Disagreements, and Action list. Those are the inputs to your judgment step.
   the _fixes_ are clean, not that the originally committed code is. Re-checking
   the whole committed diff would require committing and pushing, which stays the
   user's end-of-loop call (step 3).
-- Default to **standard mode**. Deep mode (per-finding verification) is
-  token-expensive, and the loop already provides iteration — only pass deep
-  through if the user explicitly asked for a "deep" loop.
 
 ### 2. Judge the findings — the heart of the loop
 
