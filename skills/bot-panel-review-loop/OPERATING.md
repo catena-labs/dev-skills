@@ -35,42 +35,31 @@ alike. See "Reservations" and "Cron setup" below.
    completion and exits; a `sweep-lock` makes overlapping 5-min fires no-ops.
    Under `/loop`, wake ~every 5 min (`270s`) on every tick; a sub-agent
    completion also wakes the loop and frees a slot.
-2. **Concurrency: a durable cap of 3, enforced by `reserve.sh`** — not by
-   counting in your head. Before dispatch, `reserve <pr> <head>`: `ok` →
-   dispatch, `full` → stop this tick, `held` → skip (already in flight). Never
-   kill or interrupt an in-flight review.
-3. **In-flight is the lease table, not memory.** `select-prs.sh` cannot tell you
-   what is mid-review (a PR being reviewed still shows NEW/UPDATED until its new
-   `head=` marker is posted), but `reserve` returns `held` for it — so the
-   driver carries no `{PR -> agent}` map and the cap survives a compaction or
-   restart.
-4. **Release on return; reconcile each tick.** `release <pr>` whenever a
-   sub-agent returns (approve/do-not-approve/skip/defer) or a dispatch fails to
-   start. At the top of each sweep, reconcile: for any lease whose PR the
-   prefilter now reports SEEN-at-head, `release` it (its summary marker landed).
-   The TTL (default 30 min) is only a crash backstop.
+2. **Concurrency: a durable cap of 3 via `reserve.sh`**, not counting in your
+   head. `reserve <pr> <head>` before dispatch → `ok` dispatch, `full` stop this
+   tick, `held` skip. The lease table is the in-flight truth (no `{PR -> agent}`
+   map to carry), so `held` also covers a PR `select-prs.sh` still shows
+   NEW/UPDATED while it's mid-review. Never kill an in-flight review.
+3. **Release on return; reconcile each tick.** `release <pr>` on any sub-agent
+   return or a failed dispatch; the TTL (30 min) is only a crash backstop. At
+   each sweep start, reconcile a compacted driver: `release` any lease whose PR
+   the prefilter now reports SEEN-at-head (its summary marker landed).
 
 ## Reservations (the lease table)
 
 `reserve.sh` (bundled, beside `select-prs.sh`/`pr-actions.sh`) is the durable
-cap and in-flight set. The **driver** calls it; the per-PR sub-agent never does.
+cap and in-flight set; the **driver** calls it, the sub-agent never does. Verbs,
+knobs (`RESERVE_CAP`/`RESERVE_TTL`/`RESERVE_DB`), and defaults live in
+`reserve.sh --help`. The operator facts not in there:
 
-- **State:** a SQLite DB at `$RESERVE_DB` (default
-  `${XDG_STATE_HOME:-$HOME/.local/state}/bot-panel-review-loop/reservations.db`),
-  **outside** the skill dir so a deployed-copy re-sync can't clobber it. Leases
-  are scoped by a `repo` column, so concurrent sweeps of different repos each
-  get their own cap. WAL mode leaves `-wal`/`-shm` sidecars; wipe all three
-  together.
-- **Knobs:** `RESERVE_CAP` (default 3), `RESERVE_TTL` seconds (default 1800),
-  `RESERVE_DB`; or `--cap`/`--ttl`/`--repo` flags.
-- **Verbs:** `reserve <pr> <head>` → `ok`/`full`/`held` (one atomic
-  `BEGIN IMMEDIATE` txn, so the cap holds under concurrent callers);
-  `release <pr>`; `renew <pr>`; `list` (TSV: pr, head, age, expires_in);
-  `slots`; `gc`; and the cron singleton `sweep-lock <ttl>` / `sweep-renew <ttl>`
-  / `sweep-unlock`. Run `bash <skill-dir>/reserve.sh --help` for the full list.
-- **Inspect / unstick:** `reserve.sh list` shows what is mid-review;
-  `reserve.sh release <pr>` frees a slot by hand; `reserve.sh gc` reclaims
-  expired leases (also done implicitly on every `reserve`/`list`/`slots`).
+- **State lives outside the skill dir** (so a deployed-copy re-sync can't
+  clobber it) and is scoped by a `repo` column, so concurrent sweeps of
+  different repos each get their own cap. WAL mode leaves `-wal`/`-shm`
+  sidecars; wipe all three together. Path and logs are under "Where things live"
+  below.
+- **Inspect / unstick:** `reserve.sh list` shows what's mid-review;
+  `reserve.sh release <pr>` frees a slot by hand; `gc` reclaims expired leases
+  (also implicit on every `reserve`/`list`/`slots`).
 
 ## Panel composition
 
@@ -85,13 +74,10 @@ cap and in-flight set. The **driver** calls it; the per-PR sub-agent never does.
   returned empty output. It is excluded simply by **not being in the pinned
   roster** — there is nothing to configure.
 - Because the skill pins `--panelist`, the `PANEL_REVIEW_PANELISTS` env var is
-  **not honored**. `panel-review`'s precedence is
-  `--panelist flags > PANEL_REVIEW_PANELISTS env > PATH auto-detect`, and the
-  env fallback only fires when **no** `--panelist` flag is given
-  (`panel-review.sh`:
-  `if [[ ${#PANEL_IDS[@]} -eq 0 && -n "$PANEL_REVIEW_PANELISTS" ]]`). So no
-  `~/.zshenv` setup is needed, and any `PANEL_REVIEW_PANELISTS` already in your
-  environment is ignored by this loop.
+  **not honored** (panel-review precedence is `--panelist` > env > PATH
+  auto-detect; the env fallback fires only when no `--panelist` is passed). So
+  no `~/.zshenv` setup is needed; any `PANEL_REVIEW_PANELISTS` in your env is
+  ignored by this loop.
 - To change the roster, edit the `--panelist` flags in `SKILL.md` (Step 4a); to
   re-add opencode once its limit resets, add `--panelist opencode`.
 
@@ -139,15 +125,12 @@ red -> skip).
 
 ## Operational gotchas
 
-- **Shared-`.git` worktree race.** Each panel makes one worktree per panelist on
-  the single `.git` (three panelists -> three worktrees per PR, up to nine at
-  cap 3). Concurrent reviews multiply `git worktree add/remove` contention; a
-  panel can **silently produce no output** (empty out-dir) under contention
-  (observed with two PRs dispatched together). The lease says "slot held", not
-  "panel produced output", so on each sweep/completion sanity-check in-flight
-  panels have a live proc or non-empty out-dir, and re-dispatch any silent miss
-  **under its existing lease** (the slot is already held — do not re-`reserve`,
-  which returns `held`).
+- **Shared-`.git` worktree race.** Concurrent panels contend on the single
+  `.git` (three worktrees per PR, up to nine at cap 3) and one can **silently
+  produce an empty out-dir** (observed with two PRs dispatched together). The
+  lease tracks "slot held", not "panel produced output", so sanity-check
+  in-flight panels each sweep and re-dispatch a silent miss **under its existing
+  lease** (don't re-`reserve`, which returns `held`).
 - **Lease and marker are separate durable state.** The `head=` summary marker is
   the _completed-review_ dedup (lives on GitHub, read by `select-prs.sh` for
   NEW/UPDATED/SEEN). The `reserve.sh` lease is the _in-flight_ cap (lives in

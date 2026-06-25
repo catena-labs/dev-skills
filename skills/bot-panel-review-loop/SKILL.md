@@ -2,19 +2,12 @@
 name: bot-panel-review-loop
 description: >-
   Use when asked to sweep, review, or babysit the open PRs in a repo with a
-  panel review and post advisory findings. For each open, CI-green PR that is
-  either non-draft or a draft labeled "ready for review" (human-approved PRs
-  included), dispatch a fresh per-PR agent that reacts 👀, runs a gather-only
-  panel review, posts inline PR comments at the correct file+line suggesting
-  fixes, posts a concise approve/do-not-approve summary (findings and a
-  human-review note for sensitive surfaces — auth, money movement, schema,
-  secrets — folded into collapsible sections), and swaps its 👀 reaction to 🚀
-  on an approve verdict (leaving 👀 when it left comments). Tracks engagement
-  (NEW / UPDATED / SEEN), re-reviewing the whole PR whenever it has new commits
-  and posting each inline comment at most once (never re-posting one already on
-  the PR or one a human resolved), while writing a fresh summary comment each
-  review, so it doesn't repeat work. Read-only toward the code: it never edits,
-  commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
+  panel review and post advisory findings. Dispatches a fresh agent per
+  actionable PR (open, CI-green, not already reviewed at its head) that runs a
+  gather-only panel review and posts inline fix comments plus an
+  approve/do-not-approve verdict summary. Read-only toward the code: never
+  edits, commits, or pushes. Designed as the body of `/loop
+  /bot-panel-review-loop`.
 allowed-tools:
   Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion,
   ScheduleWakeup
@@ -146,46 +139,28 @@ pin one; the judgment (which findings are real, the verdict) wants the strong
 model. The subagent doesn't load this skill, so **pass it the absolute path to
 `pr-actions.sh`** (the same `<skill-dir>` from Step 1) along with the brief.
 
-**Concurrency: a durable cap of 3 reviews in flight, enforced by `reserve.sh`.**
-The cap and the in-flight set live in a SQLite lease table now, not in this
-conversation — so they survive a context compaction, a session restart, or a
-fresh-context cron sweep. The **driver** owns it; the per-PR sub-agent never
-touches reservations. Before dispatching a candidate, the driver runs
-`bash <skill-dir>/reserve.sh reserve {number} {head}` and acts on the one-word
-disposition: `ok` → dispatch the sub-agent; `full` → the repo is at the cap,
-stop dispatching this tick; `held` → a live lease already exists (the PR is
-mid-review) → skip it. There is no in-memory `{PR -> agent}` map to carry: the
-lease table is the entire in-flight truth, so the Step-1 prefilter's blind spot
-(a PR being reviewed still shows NEW/UPDATED because its new `head=` marker is
-not posted until the review finishes) is covered by the `held` disposition.
+**Concurrency: a durable cap of 3, driven via `reserve.sh`** (the **driver**
+owns every call; the sub-agent never touches it; `reserve.sh --help` has the
+full verb list). The lease table is the whole in-flight truth, so there's no
+`{PR -> agent}` map to carry across a compaction. The driver loop:
 
-Each review still runs `panel-review.sh`, which materializes one throwaway git
-worktree _per panelist_ under a `mktemp` dir pinned to the PR head. Those linked
-worktrees share this repo's single `.git`, so every concurrent review multiplies
-`git worktree add`/`remove` contention on `.git/worktrees` and the index/config
-locks. The panel is three panelists (claude, codex, and a second claude running
-`decompose` — its own process and worktree, not a longer prompt), so each PR
-materializes three worktrees and a cap of 3 PRs means up to nine concurrent
-worktrees. Under that contention a panel can occasionally produce no output (an
-empty out-dir); the lease tracks "slot held", not "panel produced output", so on
-each sweep still sanity-check that every in-flight panel has a live process or a
-non-empty out-dir, and re-dispatch any silent miss **under its existing lease**
-(the slot is already held — do not re-`reserve`, which would return `held`).
+- **Gate** each candidate with `reserve {num} {head}` → `ok` dispatch, `full`
+  stop this tick, `held` skip. `held` also masks a PR the Step-1 prefilter
+  mislabels NEW/UPDATED mid-review (its `head=` marker lands only when the
+  review finishes).
+- **`release {num}`** on every sub-agent return and on a failed dispatch; TTL is
+  only a crash backstop.
+- **Reconcile each sweep** — the two gaps `reserve.sh` can't see for itself: (1)
+  if the driver compacted between a return and its `release`, `list` and
+  `release` any leased PR the prefilter now reports SEEN at its lease head; (2)
+  the lease means "slot held", not "panel produced output", so re-dispatch any
+  in-flight panel with no live process and an empty out-dir (worktree-lock
+  contention drops one occasionally) **under its existing lease** — don't
+  re-`reserve`, which returns `held`.
 
-**Release on return; reconcile each tick.** When a dispatched sub-agent returns
-— approve, do-not-approve, skip, or defer — the driver runs
-`bash <skill-dir>/reserve.sh release {number}`. If a dispatch fails to even
-start, release immediately rather than pinning a slot. The generous TTL (default
-30 min, ~2× a worst-case decompose panel) is only a crash backstop, not the
-normal release path. To stay correct even if the driver's own context compacted
-after a sub-agent returned, **reconcile at the top of each sweep**: run
-`reserve.sh list` and, for any leased PR the prefilter now reports SEEN at the
-lease's head (its summary marker landed), `release` it — the durable marker is
-the completion signal, TTL the last resort. A resting sub-agent is usually slow,
-not dead (decompose panels take ~10-15 min), so WAIT rather than re-dispatching;
-check the PR's live state before ever re-dispatching, or you race a duplicate
-panel and a duplicate summary. The full cross-tick operating model lives in
-`OPERATING.md` in this directory.
+A resting sub-agent is usually slow, not dead (decompose runs 10-15 min): WAIT
+and check live PR state before re-dispatching, or you race a duplicate panel and
+summary. Full cross-tick model in `OPERATING.md`.
 
 The skill never checks out a PR into your working tree; the diff arrives over
 the GitHub API via `gh`, so nothing here scales with PR size. The review path
