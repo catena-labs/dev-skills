@@ -221,17 +221,18 @@ below).
 the `<name> (<model>)` pairs that actually ran. The panel is three panelists —
 `claude` and `codex` doing a standard whole-diff review, plus `claude-decompose`
 (a second claude running the `decompose` approach; that is the id its heartbeat
-reports). Two strong, independent models plus a deep chunked pass is the right
-roster for an autonomous, high-volume sweep. Even with the roster pinned, don't
-assume all three ran: a CLI missing from `PATH` silently shrinks the panel, so
-record what the heartbeats actually report — and treat any
-`done (exit N) — FAILED: …` heartbeat as a panelist that did **not** contribute
-(non-zero exit or empty output), not a clean review. Note each panelist's
-approach on the Panel line (which ran standard, which ran decompose). Depth
-scales with panel breadth (how many models ran) and the decompose pass, never
-with rounds (a `--pr` review is one pass). If only one panelist ran, say so in
-the summary — a single panelist is a thinner signal than a true multi-model
-panel.
+reports, though the Panel line and report table render it in the invocation's
+slash form, `claude/decompose` — same panelist, just the display convention).
+Two strong, independent models plus a deep chunked pass is the right roster for
+an autonomous, high-volume sweep. Even with the roster pinned, don't assume all
+three ran: a CLI missing from `PATH` silently shrinks the panel, so record what
+the heartbeats actually report — and treat any `done (exit N) — FAILED: …`
+heartbeat as a panelist that did **not** contribute (non-zero exit or empty
+output), not a clean review. Note each panelist's approach on the Panel line
+(which ran standard, which ran decompose). Depth scales with panel breadth (how
+many models ran) and the decompose pass, never with rounds (a `--pr` review is
+one pass). If only one panelist ran, say so in the summary — a single panelist
+is a thinner signal than a true multi-model panel.
 
 **Verify before you stand on a finding.** Review depth comes from the panel
 itself now — two models doing holistic reviews plus a third running the
