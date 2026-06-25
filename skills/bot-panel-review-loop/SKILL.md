@@ -1,6 +1,6 @@
 ---
 name: bot-panel-review-loop
-description:
+description: >-
   Use when asked to sweep, review, or babysit the open PRs in a repo with a
   panel review and post advisory findings. For each open, CI-green PR that is
   either non-draft or a draft labeled "ready for review" (human-approved PRs
@@ -16,7 +16,8 @@ description:
   review, so it doesn't repeat work. Read-only toward the code: it never edits,
   commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
 allowed-tools:
-  Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
+  Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion,
+  ScheduleWakeup
 argument-hint: "[--exclude-own] [--dependabot]"
 ---
 
