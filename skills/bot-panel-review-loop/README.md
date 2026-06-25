@@ -35,15 +35,11 @@ loop indefinitely.
 - `--dependabot` — include Dependabot PRs (default: skip them).
 
 Every PR is reviewed at the same depth — there is no depth flag. Each review
-runs `panel-review --approach decompose`, so every panelist reviews by chunking
-the diff plus a cross-boundary seam pass instead of one whole-diff skim. It
-self-scales with diff size, so small PRs stay cheap.
-
-This skill does not pick the panel — it passes no `--panelist` flag, so
-composition is whatever `panel-review` resolves. The roster is currently `codex`
-and `claude`, set via the `PANEL_REVIEW_PANELISTS` env var (the rate-limited
-opencode panelist is dropped); see `OPERATING.md` for how to set it and the rest
-of the operating model.
+runs `panel-review` with
+`--panelist claude --panelist codex --panelist claude/decompose`, so the panel
+is three panelists: claude and codex each do a standard whole-diff review, plus
+a second claude chunks the diff and adds a cross-boundary seam pass (the
+`decompose` approach). It self-scales with diff size, so small PRs stay cheap.
 
 Already-approved PRs are reviewed by default (the engagement marker still keeps
 it from re-reviewing one at the same head).
@@ -56,7 +52,8 @@ npx skills add catena-labs/dev-skills --skill bot-panel-review-loop
 
 Each per-PR agent runs a gather-only
 [`panel-review`](https://github.com/catena-labs/dev-skills/tree/main/skills/panel-review)
-(read-only, with the `decompose` approach), so install it too:
+(read-only; one of its three panelists uses the `decompose` approach), so
+install it too:
 
 ```
 npx skills add catena-labs/dev-skills --skill panel-review
@@ -74,12 +71,12 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   NEW or UPDATED since the last review, has no merge conflicts, and has green
   CI.
 - **Dispatches one fresh agent per PR.** Each agent reacts 👀, runs a
-  gather-only panel review of that PR's diff (with the `decompose` approach, so
-  each panelist reviews in scoped chunks plus a seam pass for depth), and posts
-  back. A second bundled script, `pr-actions.sh`, carries the per-PR GitHub
-  plumbing (re-confirm live state, react, fetch existing threads, post comments,
-  post the summary, settle the reaction), so the agent never hand-assembles
-  `gh`/`graphql` or escapes comment JSON itself.
+  gather-only panel review of that PR's diff (claude + codex holistic, plus a
+  third claude running `decompose` for a scoped-chunk-plus-seam-pass deep read),
+  and posts back. A second bundled script, `pr-actions.sh`, carries the per-PR
+  GitHub plumbing (re-confirm live state, react, fetch existing threads, post
+  comments, post the summary, settle the reaction), so the agent never
+  hand-assembles `gh`/`graphql` or escapes comment JSON itself.
 - **Posts inline fix suggestions** at the correct file + line, with one-click
   ` ```suggestion ` blocks where the fix is concrete.
 - **Posts a concise approve / do-not-approve summary** per PR. The visible body
@@ -111,13 +108,14 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   before the rename) so a re-sweep skips unchanged PRs. Don't delete those
   marker comments unless you want a PR re-reviewed.
 - **Each actionable PR costs a full fan-out.** A per-PR agent runs
-  `panel-review` (multiple CLI agents, minutes of wall clock); the `decompose`
-  approach makes each panelist's review more thorough (and slower) but adds no
-  extra processes. Concurrency is a loose cap of 3 reviews in flight, checked
-  only at dispatch and tracked across `/loop` ticks; a busy repo sweep still
-  takes a while. See `OPERATING.md` for the in-flight-tracking and top-up model.
-- **A thin panel is possible.** The panel is `codex` + `claude` (set via the
-  `PANEL_REVIEW_PANELISTS` env var, not pinned in this skill); a CLI missing
-  from `PATH`, a changed env var, or one that returns a
-  `done (exit N) — FAILED: …` heartbeat silently shrinks the panel, and the
+  `panel-review` (three CLI panelists — claude, codex, and a second claude on
+  `decompose` — minutes of wall clock); the decompose pass is its own panelist
+  process and worktree, not a longer prompt on an existing one, so each PR
+  materializes three worktrees. Concurrency is a loose cap of 3 reviews in
+  flight, checked only at dispatch and tracked across `/loop` ticks; a busy repo
+  sweep still takes a while. See `OPERATING.md` for the in-flight-tracking and
+  top-up model.
+- **A thin panel is possible.** The panel is `claude` + `codex` + a second
+  `claude` on `decompose`; a CLI missing from `PATH`, or one that returns a
+  `done (exit N) — FAILED: …` heartbeat, silently shrinks the panel, and the
   summary's **Panel** line flags it.
