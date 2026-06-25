@@ -66,8 +66,10 @@ the same head.
 Already-approved PRs are reviewed by default; there is no flag to skip them (the
 engagement marker already prevents re-reviewing one at the same head).
 
-Every review runs the panel with the `decompose` approach on (see Step 4) —
-depth is built into each review, not a flag you pass.
+Every review runs the same three-panelist panel (see Step 4): `claude` and
+`codex` each do a standard whole-diff review, plus a third panelist — a second
+`claude` running the `decompose` approach — does a deep chunked pass. The
+composition is built into each review, not a flag you pass.
 
 ## Selection gates (a PR is reviewed only if ALL hold)
 
@@ -113,8 +115,9 @@ sentinel-delimited sections:
   `UPDATED` (UPDATED = there are new commits since the last review); `note`
   flags a PR with no CI checks. **This is the dispatch list for Step 4** — one
   agent per entry. (Review depth no longer varies by PR size — every review runs
-  the same panel, every panelist using the `decompose` approach, which
-  self-scales — so the prefilter carries no size/tier fields.)
+  the same three-panelist panel — claude + codex (standard) plus a second claude
+  running `decompose` — which self-scales, so the prefilter carries no size/tier
+  fields.)
 - `===REPORT_TABLE===` — a prebuilt markdown table, one row per open PR
   (unlabeled drafts are dropped entirely, so they never appear). Every
   skipped/deferred row already carries its reason; each actionable row carries
@@ -143,10 +146,11 @@ dir pinned to the PR head. Those linked worktrees share this repo's single
 `.git`, so fanning out every PR at once means (PRs x panelists) concurrent
 `git worktree add`/`remove` racing on `.git/worktrees` and index/config locks.
 Dispatch in small batches (or sequentially if a batch errors on a git lock) —
-fresh-context-per-PR is the goal, not maximum parallelism. The decompose
-approach (Step 4a) doesn't change this bound: it makes each existing panelist's
-single review more thorough (a longer prompt, more wall-clock per panelist) —
-not extra processes or worktrees.
+fresh-context-per-PR is the goal, not maximum parallelism. The panel is three
+panelists (claude, codex, and a second claude running `decompose`), so each PR
+materializes three worktrees — the decompose pass is its own panelist process
+and worktree, not a longer prompt on an existing one. Factor that into the (PRs
+x panelists) bound.
 
 The skill never checks out a PR into your working tree; the diff arrives over
 the GitHub API via `gh`, so nothing here scales with PR size. The review path
@@ -192,16 +196,19 @@ bash <skill-dir>/pr-actions.sh react {number}    # adds 👀
 ```
 
 Then invoke the **`panel-review`** skill via the Skill tool, targeting the PR
-with the decompose approach turned on and the panel pinned to `codex` + `claude`
-(`/panel-review --pr {number} --approach decompose --panelist codex --panelist claude`),
+with the panel pinned to three panelists — `claude` and `codex` each doing a
+standard whole-diff review, plus a second `claude` running the `decompose`
+approach
+(`/panel-review --pr {number} --panelist claude --panelist codex --panelist claude/decompose`),
 with one overriding instruction:
 
 > **Gather-only. Do NOT modify the working tree; do not edit, commit, or push.**
 
-`--approach decompose` tells every panelist to review by decomposing — chunk the
-diff into coherent groups, read each closely, then a cross-boundary seam pass —
-instead of one whole-diff skim. That depth happens _inside_ each CLI panelist
-(no nesting, no extra orchestration on your part); you just pass the flag. A
+The `claude/decompose` panelist reviews by decomposing — chunk the diff into
+coherent groups, read each closely, then a cross-boundary seam pass — while the
+bare `claude` and `codex` panelists do the standard holistic whole-diff pass, so
+one fan-out gives you both lenses. That depth happens _inside_ each CLI panelist
+(no nesting, no extra orchestration on your part); you just pass the flags. A
 `--pr` panel review is a single gather-and-synthesize pass and is read-only by
 design (its panelists run worktree-isolated with GitHub-write forbidden), so
 each invocation is exactly one fan-out — there is no fix/re-review loop to
@@ -211,31 +218,35 @@ below).
 
 **Record the panel composition.** `panel-review` emits one
 `panel-review: <name> (<model>) done (exit N)` heartbeat per panelist; collect
-the `<name> (<model>)` pairs that actually ran. The panel is `codex` + `claude`
-(two strong, independent models — the right roster for an autonomous,
-high-volume sweep). Even with the roster pinned, don't assume both ran: a CLI
-missing from `PATH` silently shrinks the panel, so record what the heartbeats
-actually report — and treat any `done (exit N) — FAILED: …` heartbeat as a
-panelist that did **not** contribute (non-zero exit or empty output), not a
-clean review. Every panelist ran the decompose approach (you passed
-`--approach decompose`), so note that on the Panel line. Depth scales with panel
-breadth (how many models ran) and the decompose approach, never with rounds (a
-`--pr` review is one pass). If only one panelist ran, say so in the summary — a
-single panelist is a thinner signal than a true multi-model panel.
+the `<name> (<model>)` pairs that actually ran. The panel is three panelists —
+`claude` and `codex` doing a standard whole-diff review, plus `claude-decompose`
+(a second claude running the `decompose` approach; that is the id its heartbeat
+reports, though the Panel line and report table render it in the invocation's
+slash form, `claude/decompose` — same panelist, just the display convention).
+Two strong, independent models plus a deep chunked pass is the right roster for
+an autonomous, high-volume sweep. Even with the roster pinned, don't assume all
+three ran: a CLI missing from `PATH` silently shrinks the panel, so record what
+the heartbeats actually report — and treat any `done (exit N) — FAILED: …`
+heartbeat as a panelist that did **not** contribute (non-zero exit or empty
+output), not a clean review. Note each panelist's approach on the Panel line
+(which ran standard, which ran decompose). Depth scales with panel breadth (how
+many models ran) and the decompose pass, never with rounds (a `--pr` review is
+one pass). If only one panelist ran, say so in the summary — a single panelist
+is a thinner signal than a true multi-model panel.
 
 **Verify before you stand on a finding.** Review depth comes from the panel
-itself now — multiple models, each reviewing with the decompose approach — so
-there is no per-PR tier to choose and no decomposition to orchestrate by hand.
-What stays yours, as the per-PR judge: before any HIGH or CRITICAL finding is
-allowed to stand in a do-not-approve verdict, do a focused adversarial re-read
-of it whose only goal is to _refute_ it (open the cited code, decide real vs
-false-positive); keep it only if it survives. This is **mandatory on sensitive
-surfaces** (auth, money, schema/migration, secrets) — it is what lets a clean
-verdict on auth or money carry confidence — and is the calibration rule ("verify
-single-panelist HIGH before recommending") applied everywhere else. If your
-runtime allows nesting, a separate skeptic subagent per finding is stronger than
-an inline re-read. At most one refute pass per _distinct_ surviving
-HIGH/CRITICAL.
+itself now — two models doing holistic reviews plus a third running the
+decompose deep pass — so there is no per-PR tier to choose and no decomposition
+to orchestrate by hand. What stays yours, as the per-PR judge: before any HIGH
+or CRITICAL finding is allowed to stand in a do-not-approve verdict, do a
+focused adversarial re-read of it whose only goal is to _refute_ it (open the
+cited code, decide real vs false-positive); keep it only if it survives. This is
+**mandatory on sensitive surfaces** (auth, money, schema/migration, secrets) —
+it is what lets a clean verdict on auth or money carry confidence — and is the
+calibration rule ("verify single-panelist HIGH before recommending") applied
+everywhere else. If your runtime allows nesting, a separate skeptic subagent per
+finding is stronger than an inline re-read. At most one refute pass per
+_distinct_ surviving HIGH/CRITICAL.
 
 The per-finding ledger: severity, `file:line`, the issue, the recommended fix,
 and the **FIX**/**FOREGO** verdict (with forego reason). Calibration:
@@ -389,7 +400,7 @@ it keeps working across the stacked summaries.
 
 **Verdict: <Approve | Do not approve yet>.** <one-line reason>
 
-**Panel:** {name (model), name (model), ...} (approach: decompose), at {short head}; gather-only, no code was changed. <only-if-thin: note that fewer panelists ran than expected, e.g. "only one CLI panelist was detected on PATH, so consensus is single-panelist.">
+**Panel:** {name (model) per panelist, noting its approach — e.g. "claude (opus-4.8) + codex (gpt-5) standard, claude/decompose (opus-4.8)"}, at {short head}; gather-only, no code was changed. <only-if-thin: note that fewer panelists ran than expected, e.g. "only one CLI panelist was detected on PATH, so consensus is single-panelist.">
 
 <details>
 <summary><b>Recommend fixing ({count})</b></summary>
@@ -422,11 +433,11 @@ it keeps working across the stacked summaries.
 <!-- bot-panel-review-loop: head={headRefOid} -->
 ```
 
-The **Panel** line is mandatory: list every panelist that ran — each CLI as
-`name (model)` and note the review approach (`decompose`) — so the summary is
-self-describing about the panel's breadth and flags a thin single-CLI run.
-Everything else is collapsed by design — do not promote a findings list or the
-human-review note into the visible body.
+The **Panel** line is mandatory: list every panelist that ran — each as
+`name (model)` and note its review approach (standard or `decompose`) — so the
+summary is self-describing about the panel's breadth and flags a thin single-CLI
+run. Everything else is collapsed by design — do not promote a findings list or
+the human-review note into the visible body.
 
 **Verdict rule:** **Do not approve yet** if any FIX finding is CRITICAL/HIGH or
 a substantiated wrong-approach flag survives; **Approve** if only MEDIUM/LOW
@@ -473,7 +484,7 @@ worth addressing. Reactions dedupe per actor+content, so the swap is idempotent
 on an UPDATED re-review.
 
 Return to the sweep:
-`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+...; approach: decompose] [human-review: {surfaces or none}]`.
+`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [human-review: {surfaces or none}]`.
 The trailing tags let the sweep show panel breadth and the human-review flag
 without re-reading each PR.
 
@@ -486,13 +497,13 @@ PR's agent returned: the **Result** (verdict + finding counts), the **Panel**
 (which panelists ran), and the **Human** column (human-review surfaces, or
 blank). Skip and defer rows are already final.
 
-| PR   | Title           | Engagement | Result                          | Panel                            | Human |
-| ---- | --------------- | ---------- | ------------------------------- | -------------------------------- | ----- |
-| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | codex+claude (decompose)         | auth  |
-| #905 | fee preview     | UPDATED    | approve (clean)                 | claude (decompose; codex/oc n/a) | money |
-| #906 | bump deps       | -          | dependabot → skipped            | -                                | -     |
-| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -                                | -     |
-| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -                                | -     |
+| PR   | Title           | Engagement | Result                          | Panel                               | Human |
+| ---- | --------------- | ---------- | ------------------------------- | ----------------------------------- | ----- |
+| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | claude+codex+claude/decompose       | auth  |
+| #905 | fee preview     | UPDATED    | approve (clean)                 | claude+claude/decompose (codex n/a) | money |
+| #906 | bump deps       | -          | dependabot → skipped            | -                                   | -     |
+| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -                                   | -     |
+| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -                                   | -     |
 
 Keep it to signal — detailed findings live on each PR. The Panel column says at
 a glance whether a review was a full multi-model panel or a thinner single-CLI
