@@ -28,11 +28,16 @@ the actionable PRs, then **dispatches one fresh agent per PR** to review it and
 post advisory comments back. **This skill never changes the code** — no edits,
 no commits, no pushes. Its only side effects are GitHub reactions and comments.
 
-Two bundled scripts carry every deterministic, no-judgment step so the bulky
+Three bundled scripts carry every deterministic, no-judgment step so the bulky
 `gh`/`jq`/`graphql` plumbing never enters the model's context and the JSON is
 never hand-escaped:
 
 - **`select-prs.sh`** (Step 1) — selection: which PRs are actionable this tick.
+- **`reserve.sh`** (Step 4) — the durable concurrency cap + in-flight tracking:
+  a SQLite lease table the **driver** consults at dispatch
+  (`reserve`/`release`). It replaces the old in-conversation in-flight map; the
+  per-PR sub-agent never touches it. Run `bash <skill-dir>/reserve.sh --help`
+  for the verb list.
 - **`pr-actions.sh`** (Step 4) — per-PR GitHub calls: re-confirm live state,
   react, fetch existing threads, post comments, post the summary, settle the
   reaction. Run `bash <skill-dir>/pr-actions.sh --help` for the verb list.
@@ -141,37 +146,46 @@ pin one; the judgment (which findings are real, the verdict) wants the strong
 model. The subagent doesn't load this skill, so **pass it the absolute path to
 `pr-actions.sh`** (the same `<skill-dir>` from Step 1) along with the brief.
 
-**Concurrency: a loose cap of 3 reviews in flight, checked only at dispatch.**
-Do not start a new review if 3 are already running; never kill or interrupt an
-in-flight one to honor the cap. Each review runs `panel-review.sh`, which
-materializes one throwaway git worktree _per panelist_ under a `mktemp` dir
-pinned to the PR head. Those linked worktrees share this repo's single `.git`,
-so every concurrent review multiplies `git worktree add`/`remove` contention on
-`.git/worktrees` and the index/config locks; at cap 3 a panel can occasionally
-produce no output (an empty out-dir) under that contention. The cap is "loose"
-for exactly this reason — throughput traded against a small silent-failure risk
-— so on each sweep sanity-check that every in-flight panel still has a live
-process or a non-empty out-dir, and re-dispatch any silent miss. The panel is
-three panelists (claude, codex, and a second claude running `decompose`), so
-each PR materializes three worktrees — the decompose pass is its own panelist
-process and worktree, not a longer prompt on an existing one. That triples the
-per-review worktree count (3 PRs at cap means up to nine concurrent worktrees on
-the shared `.git`) but does not change the loose cap, which bounds concurrent
-_reviews_, not panelists.
+**Concurrency: a durable cap of 3 reviews in flight, enforced by `reserve.sh`.**
+The cap and the in-flight set live in a SQLite lease table now, not in this
+conversation — so they survive a context compaction, a session restart, or a
+fresh-context cron sweep. The **driver** owns it; the per-PR sub-agent never
+touches reservations. Before dispatching a candidate, the driver runs
+`bash <skill-dir>/reserve.sh reserve {number} {head}` and acts on the one-word
+disposition: `ok` → dispatch the sub-agent; `full` → the repo is at the cap,
+stop dispatching this tick; `held` → a live lease already exists (the PR is
+mid-review) → skip it. There is no in-memory `{PR -> agent}` map to carry: the
+lease table is the entire in-flight truth, so the Step-1 prefilter's blind spot
+(a PR being reviewed still shows NEW/UPDATED because its new `head=` marker is
+not posted until the review finishes) is covered by the `held` disposition.
 
-**Track the in-flight set across ticks and top up.** Dispatch each PR's review
-as a background sub-agent and keep a `{PR number -> sub-agent id}` map. The Step
-1 prefilter cannot tell you what is mid-review: a PR being reviewed still shows
-NEW/UPDATED because its new `head=` marker is not posted until the review
-finishes, so without this map the next tick re-dispatches a PR already in
-flight. Each tick, exclude the in-flight PRs from the actionable list, dispatch
-up to `available = 3 - len(in_flight)` of the rest, and drop a PR from the map
-when its agent reports completion (which also frees a slot and wakes the loop).
-**A resting sub-agent is usually slow, not dead** — decompose panels take ~10-15
-min — so WAIT for it to self-resume rather than re-dispatching; check the PR's
-live state (latest summary marker, reactions) before ever re-dispatching, or you
-race a duplicate panel and a duplicate summary. The full cross-tick operating
-model lives in `OPERATING.md` in this directory.
+Each review still runs `panel-review.sh`, which materializes one throwaway git
+worktree _per panelist_ under a `mktemp` dir pinned to the PR head. Those linked
+worktrees share this repo's single `.git`, so every concurrent review multiplies
+`git worktree add`/`remove` contention on `.git/worktrees` and the index/config
+locks. The panel is three panelists (claude, codex, and a second claude running
+`decompose` — its own process and worktree, not a longer prompt), so each PR
+materializes three worktrees and a cap of 3 PRs means up to nine concurrent
+worktrees. Under that contention a panel can occasionally produce no output (an
+empty out-dir); the lease tracks "slot held", not "panel produced output", so on
+each sweep still sanity-check that every in-flight panel has a live process or a
+non-empty out-dir, and re-dispatch any silent miss **under its existing lease**
+(the slot is already held — do not re-`reserve`, which would return `held`).
+
+**Release on return; reconcile each tick.** When a dispatched sub-agent returns
+— approve, do-not-approve, skip, or defer — the driver runs
+`bash <skill-dir>/reserve.sh release {number}`. If a dispatch fails to even
+start, release immediately rather than pinning a slot. The generous TTL (default
+30 min, ~2× a worst-case decompose panel) is only a crash backstop, not the
+normal release path. To stay correct even if the driver's own context compacted
+after a sub-agent returned, **reconcile at the top of each sweep**: run
+`reserve.sh list` and, for any leased PR the prefilter now reports SEEN at the
+lease's head (its summary marker landed), `release` it — the durable marker is
+the completion signal, TTL the last resort. A resting sub-agent is usually slow,
+not dead (decompose panels take ~10-15 min), so WAIT rather than re-dispatching;
+check the PR's live state before ever re-dispatching, or you race a duplicate
+panel and a duplicate summary. The full cross-tick operating model lives in
+`OPERATING.md` in this directory.
 
 The skill never checks out a PR into your working tree; the diff arrives over
 the GitHub API via `gh`, so nothing here scales with PR size. The review path
@@ -539,27 +553,59 @@ a glance whether a review was a full multi-model panel or a thinner single-CLI
 run; the Human column surfaces which approved PRs still want a human sign-off,
 so a clean 🚀 on sensitive code is not mistaken for "no one needs to look."
 
-## Loop semantics (when driven by /loop or /schedule)
+## Sweep cadence (local cron is primary; `/loop` is the fallback)
 
-`/loop` owns cadence; one invocation is one full sweep. **Default dynamic-mode
-delay: every ~5 minutes — use `270s` on every tick**, whether the board is idle,
-freshly reviewed, or has PRs deferred on pending CI. A 5-minute cadence keeps
-new and updated PRs picked up promptly and catches CI as it goes green. Use
-`270s`, not a literal `300s`: 270s sits just under the 5-minute prompt-cache TTL
-so each tick stays cache-warm, whereas 300s pays a cache miss without buying a
-longer wait. Only stretch past this (toward `1200s`+) if you have a specific
+**Primary: a local cron fires one self-draining sweep every ~5 minutes.** A
+launchd job (or crontab) runs `claude -p "/bot-panel-review-loop"` headless;
+each fire is one self-contained sweep that runs to completion and exits, so the
+driver carries no state between fires — all of it is durable (completed reviews
+in GitHub `head=` markers, in-flight reviews in the `reserve.sh` lease table).
+Each fire:
+
+1. `reserve.sh sweep-lock 600` — if it prints `busy`, a previous sweep is still
+   draining → **exit immediately** (overlapping 5-minute fires become no-ops).
+2. Drain: run Step 1, `reserve` candidates up to the cap, dispatch, wait for
+   completions and `release` each, top up — repeating until no actionable PRs
+   and no active leases remain. Reconcile and `sweep-renew 600` each round.
+3. `reserve.sh sweep-unlock`; exit.
+
+It must run **locally** — the panel CLIs, the git worktrees, and the lease DB
+are all on this machine; `/schedule` (which runs in the cloud) cannot see them.
+The cron wrapper, where two env vars are load-bearing:
+
+```bash
+#!/usr/bin/env bash
+# launchd StartInterval=300  (or cron: */5 * * * *)
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0   # REQUIRED: default 10m would cut off a 15m panel
+export BASH_MAX_TIMEOUT_MS=600000               # headroom for any long bash in a sub-agent
+cd /path/to/target-repo
+timeout 5400 claude -p "/bot-panel-review-loop" \
+  --permission-mode acceptEdits \
+  --allowedTools "Bash,Read,Grep,Glob,Skill,Agent,TodoWrite" \
+  >> "$HOME/.local/state/bot-panel-review-loop/sweep.log" 2>&1
+```
+
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` is mandatory: without it `claude -p`
+stops waiting on a background review after 10 minutes and cuts the sweep off
+mid-panel. The sweep-lock TTL must exceed both the cron interval and the
+`sweep-renew` period (lock `600`s, renew every ~`120`s during the drain) or two
+live sweeps overlap and each enforces its own cap. A crashed sweep kills its
+session-scoped sub-agents, and both its leases and its sweep-lock expire by TTL,
+so a later fire never runs against still-live sub-agents.
+
+**Fallback: `/loop` (interactive, dynamic self-pacing).** `/loop` owns cadence;
+one invocation is one full sweep, and the same `reserve.sh` gate applies (a
+single persistent driver can't overlap itself, so it needs no sweep-lock).
+**Default dynamic-mode delay: every ~5 minutes — use `270s` on every tick**,
+whether the board is idle, freshly reviewed, or has PRs deferred on pending CI.
+Use `270s`, not a literal `300s`: 270s sits just under the 5-minute prompt-cache
+TTL so each tick stays cache-warm, whereas 300s pays a cache miss without buying
+a longer wait. Only stretch past this (toward `1200s`+) if you have a specific
 reason to back off and the user has not asked for the 5-minute default. Inherit
 the session model; never pin one. A sub-agent completion also wakes the loop
 immediately and frees a slot, so the 270s timer is just the steady heartbeat
-between them; carry the in-flight `{PR -> agent id}` set and the loose cap of 3
-across ticks (Step 4). `OPERATING.md` in this directory is the full cross-tick
+between them. `/loop` keeps one continuous context — tokens accumulate and only
+shrink via auto-compaction — but that is now safe: the in-flight set is durable
+in the lease table, not conversation memory, so a compaction can't lose track of
+a review already in flight. `OPERATING.md` in this directory is the full
 operating model.
-
-`/loop` keeps one continuous context — tokens accumulate across ticks and only
-shrink via auto-compaction. This skill keeps the main context tiny anyway (heavy
-review work lives in discarded per-PR subagents; the sweep only retains the
-prefilter's compact output plus the per-PR verdicts). For a genuinely fresh
-context every tick, drive it with `/schedule` (a cron routine) instead — each
-run is a new session, which works here because all NEW/UPDATED/SEEN state lives
-in the GitHub head markers, not in conversation memory. The trade is
-fixed-interval cron vs `/loop`'s dynamic self-pacing.
