@@ -126,7 +126,7 @@ case "$verb" in
         # withdrawn approval. Scoped to our own rocket, so a human's 🚀 is
         # untouched; a no-op when there is nothing to clear (the common case).
         me="$(gh api user -q .login)"
-        rid="$(gh api "repos/$REPO/issues/$num/reactions" -H "Accept: application/vnd.github+json" \
+        rid="$(gh api "repos/$REPO/issues/$num/reactions" --paginate -H "Accept: application/vnd.github+json" \
           -q ".[] | select(.user.login==\"$me\" and .content==\"rocket\") | .id" | head -n1)"
         if [[ -n "$rid" ]]; then
           gh api "repos/$REPO/issues/$num/reactions/$rid" --method DELETE >/dev/null 2>&1 \

@@ -187,7 +187,12 @@ self-draining singleton sweep:
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0   # REQUIRED: the 10-min default would cut off a 15-min panel
 export BASH_MAX_TIMEOUT_MS=600000               # headroom for any long bash in a sub-agent
 cd /path/to/target-repo                          # repo context for gh + worktrees
-timeout 5400 claude -p "/bot-panel-review-loop" \
+timeout_bin="$(command -v timeout || command -v gtimeout || true)"
+if [[ -z "$timeout_bin" ]]; then
+  echo "Install GNU coreutils for timeout/gtimeout (macOS: brew install coreutils)" >&2
+  exit 1
+fi
+"$timeout_bin" 5400 claude -p "/bot-panel-review-loop" \
   --permission-mode acceptEdits \
   --allowedTools "Bash,Read,Grep,Glob,Skill,Agent,TodoWrite" \
   >> "$HOME/.local/state/bot-panel-review-loop/sweep.log" 2>&1
@@ -197,21 +202,25 @@ timeout 5400 claude -p "/bot-panel-review-loop" \
   stops waiting on a background review after 10 min and cuts the sweep off
   mid-panel.
 - The sweep self-guards with `reserve.sh sweep-lock <ttl>`, so overlapping fires
-  are no-ops. The lock TTL must exceed both the cron interval and the renew
-  period — lock `600`s, `sweep-renew 600` every ~`120`s during the drain. A
-  crash kills the session-scoped sub-agents and lets the lock + leases expire by
-  TTL, so a later fire never collides with still-live work.
+  are no-ops. Capture the token from `ok <token>` and pass it to
+  `sweep-renew <token> 600` every ~`120`s during the drain, then
+  `sweep-unlock <token>` on exit; the token prevents an expired owner from
+  mutating a newer sweep's lock. The lock TTL must exceed both the cron interval
+  and the renew period. A crash kills the session-scoped sub-agents and lets the
+  lock + leases expire by TTL, so a later fire never collides with still-live
+  work.
 - Confirm `claude`/`gh` auth works unattended, and that env vars come from the
   cron environment (launchd/crontab), not an interactive login shell.
 
 ## How another dev picks this up
 
 1. Install on `PATH` and authenticate: `codex`, `claude`, `gh` (for the target
-   repo), and **`sqlite3`** (ships on macOS and every Linux; the lease DB needs
-   it — if missing, `brew install sqlite` on macOS or `apt-get install sqlite3`
-   on Debian/Ubuntu). The skill pins the panel to
-   `claude + codex + claude/decompose`, so opencode is excluded automatically —
-   no `PANEL_REVIEW_PANELISTS` setup needed.
+   repo), a GNU timeout command (`timeout` on Linux or `gtimeout` from
+   `brew install coreutils` on macOS), and **`sqlite3`** (ships on macOS and
+   every Linux; the lease DB needs it — if missing, `brew install sqlite` on
+   macOS or `apt-get install sqlite3` on Debian/Ubuntu). The skill pins the
+   panel to `claude + codex + claude/decompose`, so opencode is excluded
+   automatically — no `PANEL_REVIEW_PANELISTS` setup needed.
 2. `cd` into the target repo (e.g. `catena-labs/bank`).
 3. Install the local cron (see "Cron setup" above): a launchd/crontab job that
    runs `claude -p "/bot-panel-review-loop"` every ~5 min with

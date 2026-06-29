@@ -29,10 +29,13 @@
 #   list                   Active leases, TSV: `<num> <head> <age> <expires_in>`.
 #   slots                  Free slots for this repo: cap - active.
 #   gc                     Delete expired leases; print how many reclaimed.
-#   sweep-lock <ttl>       Singleton cron lock: `ok` (acquired / prior expired)
-#                          or `busy`. One sweep per repo.
-#   sweep-renew <ttl>      Extend the sweep lock.
-#   sweep-unlock           Release the sweep lock.
+#   sweep-lock <ttl>       Singleton cron lock: `ok <token>` (acquired / prior
+#                          expired) or `busy`. One sweep per repo.
+#   sweep-renew <token> [ttl]
+#                          Extend the sweep lock only if this sweep owns it.
+#                          Prints `renewed` or `missing`.
+#   sweep-unlock <token>   Release the sweep lock only if this sweep owns it.
+#                          Prints `unlocked` or `missing`.
 #
 # Exit: 0 success, 1 real error (no sqlite3/gh, db failure), 2 usage error.
 
@@ -45,10 +48,16 @@ REPO=""
 args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repo) REPO="${2:-}"; shift 2 ;;
-    --cap)  CAP="${2:-}";  shift 2 ;;
-    --ttl)  TTL="${2:-}";  shift 2 ;;
-    -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --repo)
+      [[ $# -ge 2 && "${2:-}" != -* ]] || { echo "reserve.sh: --repo needs owner/name" >&2; exit 2; }
+      REPO="$2"; shift 2 ;;
+    --cap)
+      [[ $# -ge 2 && "${2:-}" != -* ]] || { echo "reserve.sh: --cap needs an integer" >&2; exit 2; }
+      CAP="$2"; shift 2 ;;
+    --ttl)
+      [[ $# -ge 2 && "${2:-}" != -* ]] || { echo "reserve.sh: --ttl needs seconds" >&2; exit 2; }
+      TTL="$2"; shift 2 ;;
+    -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "reserve.sh: unknown flag: $1" >&2; exit 2 ;;
     *)  args+=("$1"); shift ;;
   esac
@@ -68,7 +77,7 @@ fi
 # Validate so values are safe to interpolate into SQL.
 [[ "$REPO" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "reserve.sh: bad repo '$REPO'" >&2; exit 2; }
 [[ "$CAP"  =~ ^[0-9]+$ ]]           || { echo "reserve.sh: --cap must be an integer" >&2; exit 2; }
-[[ "$TTL"  =~ ^[0-9]+$ ]]           || { echo "reserve.sh: --ttl must be an integer" >&2; exit 2; }
+[[ "$TTL"  =~ ^[1-9][0-9]*$ ]]      || { echo "reserve.sh: --ttl must be a positive integer" >&2; exit 2; }
 
 mkdir -p "$(dirname "$RESERVE_DB")" 2>/dev/null || { echo "reserve.sh: cannot create state dir for $RESERVE_DB" >&2; exit 1; }
 # .timeout (dot-command) sets the busy timeout WITHOUT printing a result row;
@@ -80,10 +89,26 @@ CREATE TABLE IF NOT EXISTS leases(
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   PRIMARY KEY(repo, pr));
 CREATE TABLE IF NOT EXISTS sweeplock(
-  repo TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);" >/dev/null \
+  repo TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, token TEXT);" >/dev/null \
   || { echo "reserve.sh: db init failed ($RESERVE_DB)" >&2; exit 1; }
+# Existing local DBs created before token fencing need this column. Ignore the
+# duplicate-column error on fresh DBs.
+db "ALTER TABLE sweeplock ADD COLUMN token TEXT;" >/dev/null 2>&1 || true
 
 need_pr() { pr="${args[1]:-}"; [[ "$pr" =~ ^[0-9]+$ ]] || { echo "reserve.sh: $verb needs <num>" >&2; exit 2; }; }
+need_token() {
+  token="${args[1]:-}"
+  [[ "$token" =~ ^[A-Za-z0-9._:-]+$ ]] || { echo "reserve.sh: $verb needs <token>" >&2; exit 2; }
+}
+make_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 16
+  elif command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr '[:upper:]' '[:lower:]'
+  else
+    printf '%s-%s-%s%s\n' "$$" "$(date +%s)" "$RANDOM" "$RANDOM"
+  fi
+}
 
 case "$verb" in
   reserve)
@@ -130,24 +155,30 @@ case "$verb" in
     echo "$n reclaimed"; echo "reserve.sh: gc $REPO -> $n reclaimed" >&2
     ;;
   sweep-lock)
-    lttl="${args[1]:-$TTL}"; [[ "$lttl" =~ ^[0-9]+$ ]] || { echo "reserve.sh: sweep-lock ttl must be integer" >&2; exit 2; }
+    lttl="${args[1]:-$TTL}"; [[ "$lttl" =~ ^[1-9][0-9]*$ ]] || { echo "reserve.sh: sweep-lock ttl must be a positive integer" >&2; exit 2; }
+    token="$(make_token)" || { echo "reserve.sh: could not generate sweep lock token" >&2; exit 1; }
     out="$(db "BEGIN IMMEDIATE;
       DELETE FROM sweeplock WHERE repo='$REPO' AND expires_at<=strftime('%s','now');
-      INSERT INTO sweeplock(repo,expires_at)
-        SELECT '$REPO', strftime('%s','now')+$lttl
+      INSERT INTO sweeplock(repo,expires_at,token)
+        SELECT '$REPO', strftime('%s','now')+$lttl, '$token'
         WHERE NOT EXISTS(SELECT 1 FROM sweeplock WHERE repo='$REPO');
-      SELECT CASE WHEN changes()=1 THEN 'ok' ELSE 'busy' END;
+      SELECT CASE WHEN changes()=1 THEN 'ok $token' ELSE 'busy' END;
       COMMIT;")" || exit 1
     echo "$out"; echo "reserve.sh: sweep-lock -> $out" >&2
     ;;
   sweep-renew)
-    lttl="${args[1]:-$TTL}"; [[ "$lttl" =~ ^[0-9]+$ ]] || { echo "reserve.sh: sweep-renew ttl must be integer" >&2; exit 2; }
-    db "UPDATE sweeplock SET expires_at=strftime('%s','now')+$lttl WHERE repo='$REPO';" >/dev/null || exit 1
-    echo "renewed"
+    need_token
+    lttl="${args[2]:-$TTL}"; [[ "$lttl" =~ ^[1-9][0-9]*$ ]] || { echo "reserve.sh: sweep-renew ttl must be a positive integer" >&2; exit 2; }
+    out="$(db "UPDATE sweeplock SET expires_at=strftime('%s','now')+$lttl
+      WHERE repo='$REPO' AND token='$token' AND expires_at>strftime('%s','now');
+      SELECT CASE WHEN changes()=1 THEN 'renewed' ELSE 'missing' END;")" || exit 1
+    echo "$out"; echo "reserve.sh: sweep-renew -> $out" >&2
     ;;
   sweep-unlock)
-    db "DELETE FROM sweeplock WHERE repo='$REPO';" >/dev/null || exit 1
-    echo "unlocked"; echo "reserve.sh: sweep-unlock" >&2
+    need_token
+    out="$(db "DELETE FROM sweeplock WHERE repo='$REPO' AND token='$token';
+      SELECT CASE WHEN changes()=1 THEN 'unlocked' ELSE 'missing' END;")" || exit 1
+    echo "$out"; echo "reserve.sh: sweep-unlock -> $out" >&2
     ;;
   *) echo "reserve.sh: unknown verb: $verb (try --help)" >&2; exit 2 ;;
 esac

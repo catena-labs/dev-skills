@@ -539,10 +539,12 @@ Each fire:
 
 1. `reserve.sh sweep-lock 600` — if it prints `busy`, a previous sweep is still
    draining → **exit immediately** (overlapping 5-minute fires become no-ops).
+   If it prints `ok <token>`, keep that token for renew/unlock.
 2. Drain: run Step 1, `reserve` candidates up to the cap, dispatch, wait for
    completions and `release` each, top up — repeating until no actionable PRs
-   and no active leases remain. Reconcile and `sweep-renew 600` each round.
-3. `reserve.sh sweep-unlock`; exit.
+   and no active leases remain. Reconcile and `sweep-renew <token> 600` each
+   round.
+3. `reserve.sh sweep-unlock <token>`; exit.
 
 It must run **locally** — the panel CLIs, the git worktrees, and the lease DB
 are all on this machine; `/schedule` (which runs in the cloud) cannot see them.
@@ -554,7 +556,12 @@ The cron wrapper, where two env vars are load-bearing:
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0   # REQUIRED: default 10m would cut off a 15m panel
 export BASH_MAX_TIMEOUT_MS=600000               # headroom for any long bash in a sub-agent
 cd /path/to/target-repo
-timeout 5400 claude -p "/bot-panel-review-loop" \
+timeout_bin="$(command -v timeout || command -v gtimeout || true)"
+if [[ -z "$timeout_bin" ]]; then
+  echo "Install GNU coreutils for timeout/gtimeout (macOS: brew install coreutils)" >&2
+  exit 1
+fi
+"$timeout_bin" 5400 claude -p "/bot-panel-review-loop" \
   --permission-mode acceptEdits \
   --allowedTools "Bash,Read,Grep,Glob,Skill,Agent,TodoWrite" \
   >> "$HOME/.local/state/bot-panel-review-loop/sweep.log" 2>&1
@@ -562,11 +569,13 @@ timeout 5400 claude -p "/bot-panel-review-loop" \
 
 `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` is mandatory: without it `claude -p`
 stops waiting on a background review after 10 minutes and cuts the sweep off
-mid-panel. The sweep-lock TTL must exceed both the cron interval and the
-`sweep-renew` period (lock `600`s, renew every ~`120`s during the drain) or two
-live sweeps overlap and each enforces its own cap. A crashed sweep kills its
-session-scoped sub-agents, and both its leases and its sweep-lock expire by TTL,
-so a later fire never runs against still-live sub-agents.
+mid-panel. The wrapper accepts GNU `timeout` on Linux or `gtimeout` from
+coreutils on macOS. The sweep-lock TTL must exceed both the cron interval and
+the `sweep-renew` period (lock `600`s, renew every ~`120`s during the drain with
+the acquired token) or two live sweeps overlap and each enforces its own cap. A
+crashed sweep kills its session-scoped sub-agents, and both its leases and its
+sweep-lock expire by TTL, so a later fire never runs against still-live
+sub-agents.
 
 **Fallback: `/loop` (interactive, dynamic self-pacing).** `/loop` owns cadence;
 one invocation is one full sweep, and the same `reserve.sh` gate applies (a
