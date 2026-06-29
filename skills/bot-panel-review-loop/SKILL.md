@@ -556,6 +556,8 @@ The cron wrapper, where two env vars are load-bearing:
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0   # REQUIRED: default 10m would cut off a 15m panel
 export BASH_MAX_TIMEOUT_MS=600000               # headroom for any long bash in a sub-agent
 cd /path/to/target-repo
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/bot-panel-review-loop"
+mkdir -p "$state_dir"
 timeout_bin="$(command -v timeout || command -v gtimeout || true)"
 if [[ -z "$timeout_bin" ]]; then
   echo "Install GNU coreutils for timeout/gtimeout (macOS: brew install coreutils)" >&2
@@ -564,7 +566,7 @@ fi
 "$timeout_bin" 5400 claude -p "/bot-panel-review-loop" \
   --permission-mode acceptEdits \
   --allowedTools "Bash,Read,Grep,Glob,Skill,Agent,TodoWrite" \
-  >> "$HOME/.local/state/bot-panel-review-loop/sweep.log" 2>&1
+  >> "$state_dir/sweep.log" 2>&1
 ```
 
 `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` is mandatory: without it `claude -p`

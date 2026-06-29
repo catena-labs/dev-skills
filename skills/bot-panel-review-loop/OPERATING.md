@@ -115,13 +115,12 @@ red -> skip).
 ## Reaction semantics + stale-🚀 on re-reviews
 
 - `settle approve` -> deletes the bot's 👀 and posts 🚀 (idempotent).
-- `settle comments` -> leaves 👀, touches no reactions.
+- `settle comments` -> leaves 👀 and clears the bot's own stale 🚀 if one
+  exists.
 - A PR can be approved (🚀), then the author pushes again -> it re-surfaces as
   UPDATED at a new head with a **stale 🚀 from the old head**. On the re-review:
-  re-approve keeps the 🚀; if the verdict **downgrades** to do-not-approve, the
-  driver/agent must DELETE the stale 🚀 by id
-  (`gh api -X DELETE repos/<owner>/<repo>/issues/<n>/reactions/<id>`) after
-  `settle comments`.
+  re-approve keeps the 🚀; if the verdict **downgrades** to do-not-approve,
+  `settle comments` deletes the stale bot 🚀 itself and leaves 👀 in place.
 
 ## Operational gotchas
 
@@ -187,6 +186,8 @@ self-draining singleton sweep:
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0   # REQUIRED: the 10-min default would cut off a 15-min panel
 export BASH_MAX_TIMEOUT_MS=600000               # headroom for any long bash in a sub-agent
 cd /path/to/target-repo                          # repo context for gh + worktrees
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/bot-panel-review-loop"
+mkdir -p "$state_dir"
 timeout_bin="$(command -v timeout || command -v gtimeout || true)"
 if [[ -z "$timeout_bin" ]]; then
   echo "Install GNU coreutils for timeout/gtimeout (macOS: brew install coreutils)" >&2
@@ -195,7 +196,7 @@ fi
 "$timeout_bin" 5400 claude -p "/bot-panel-review-loop" \
   --permission-mode acceptEdits \
   --allowedTools "Bash,Read,Grep,Glob,Skill,Agent,TodoWrite" \
-  >> "$HOME/.local/state/bot-panel-review-loop/sweep.log" 2>&1
+  >> "$state_dir/sweep.log" 2>&1
 ```
 
 - `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` is mandatory: without it `claude -p`
