@@ -84,7 +84,9 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   else — the findings lists and a human-review note for sensitive surfaces
   (auth, money movement, schema, secrets) — folds into collapsible `<details>`
   sections. It then swaps its 👀 reaction to 🚀 on an approve verdict (leaving
-  👀 when it left comments).
+  👀 when it left comments). On a re-review that downgrades a prior approve, it
+  also clears the now-stale 🚀 so the reaction never advertises a withdrawn
+  approval.
 - **Tracks engagement (NEW / UPDATED / SEEN)** via a marker comment, so it
   re-reviews the whole PR only when it has new commits and never re-posts an
   inline finding already on the PR. Each review still leaves a fresh summary
@@ -108,8 +110,11 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
 - **Each actionable PR costs a full fan-out.** A per-PR agent runs
   `panel-review` (three CLI panelists — claude, codex, and a second claude on
   `decompose` — minutes of wall clock); the decompose pass is its own panelist
-  process and worktree, not a longer prompt on an existing one. Concurrency is
-  bounded to a few PRs at a time; a busy repo sweep still takes a while.
+  process and worktree, not a longer prompt on an existing one, so each PR
+  materializes three worktrees. Concurrency is a loose cap of 3 reviews in
+  flight, checked only at dispatch and tracked across `/loop` ticks; a busy repo
+  sweep still takes a while. See `OPERATING.md` for the in-flight-tracking and
+  top-up model.
 - **A thin panel is possible.** The panel is `claude` + `codex` + a second
   `claude` on `decompose`; a CLI missing from `PATH`, or one that returns a
   `done (exit N) — FAILED: …` heartbeat, silently shrinks the panel, and the

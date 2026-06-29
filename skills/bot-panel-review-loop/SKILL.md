@@ -1,22 +1,16 @@
 ---
 name: bot-panel-review-loop
-description:
+description: >-
   Use when asked to sweep, review, or babysit the open PRs in a repo with a
-  panel review and post advisory findings. For each open, CI-green PR that is
-  either non-draft or a draft labeled "ready for review" (human-approved PRs
-  included), dispatch a fresh per-PR agent that reacts 👀, runs a gather-only
-  panel review, posts inline PR comments at the correct file+line suggesting
-  fixes, posts a concise approve/do-not-approve summary (findings and a
-  human-review note for sensitive surfaces — auth, money movement, schema,
-  secrets — folded into collapsible sections), and swaps its 👀 reaction to 🚀
-  on an approve verdict (leaving 👀 when it left comments). Tracks engagement
-  (NEW / UPDATED / SEEN), re-reviewing the whole PR whenever it has new commits
-  and posting each inline comment at most once (never re-posting one already on
-  the PR or one a human resolved), while writing a fresh summary comment each
-  review, so it doesn't repeat work. Read-only toward the code: it never edits,
-  commits, or pushes. Designed to be the body of `/loop /bot-panel-review-loop`.
+  panel review and post advisory findings. Dispatches a fresh agent per
+  actionable PR (open, CI-green, not already reviewed at its head) that runs a
+  gather-only panel review and posts inline fix comments plus an
+  approve/do-not-approve verdict summary. Read-only toward the code: never
+  edits, commits, or pushes. Designed as the body of `/loop
+  /bot-panel-review-loop`.
 allowed-tools:
-  Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion, ScheduleWakeup
+  Bash, Read, Grep, Glob, Skill, Agent, TodoWrite, AskUserQuestion,
+  ScheduleWakeup
 argument-hint: "[--exclude-own] [--dependabot]"
 ---
 
@@ -27,11 +21,16 @@ the actionable PRs, then **dispatches one fresh agent per PR** to review it and
 post advisory comments back. **This skill never changes the code** — no edits,
 no commits, no pushes. Its only side effects are GitHub reactions and comments.
 
-Two bundled scripts carry every deterministic, no-judgment step so the bulky
+Three bundled scripts carry every deterministic, no-judgment step so the bulky
 `gh`/`jq`/`graphql` plumbing never enters the model's context and the JSON is
 never hand-escaped:
 
 - **`select-prs.sh`** (Step 1) — selection: which PRs are actionable this tick.
+- **`reserve.sh`** (Step 4) — the durable concurrency cap + in-flight tracking:
+  a SQLite lease table the **driver** consults at dispatch
+  (`reserve`/`release`). It replaces the old in-conversation in-flight map; the
+  per-PR sub-agent never touches it. Run `bash <skill-dir>/reserve.sh --help`
+  for the verb list.
 - **`pr-actions.sh`** (Step 4) — per-PR GitHub calls: re-confirm live state,
   react, fetch existing threads, post comments, post the summary, settle the
   reaction. Run `bash <skill-dir>/pr-actions.sh --help` for the verb list.
@@ -140,17 +139,28 @@ pin one; the judgment (which findings are real, the verdict) wants the strong
 model. The subagent doesn't load this skill, so **pass it the absolute path to
 `pr-actions.sh`** (the same `<skill-dir>` from Step 1) along with the brief.
 
-**Bound concurrency to 2-3 PRs at a time.** Each review runs `panel-review.sh`,
-which materializes one throwaway git worktree _per panelist_ under a `mktemp`
-dir pinned to the PR head. Those linked worktrees share this repo's single
-`.git`, so fanning out every PR at once means (PRs x panelists) concurrent
-`git worktree add`/`remove` racing on `.git/worktrees` and index/config locks.
-Dispatch in small batches (or sequentially if a batch errors on a git lock) —
-fresh-context-per-PR is the goal, not maximum parallelism. The panel is three
-panelists (claude, codex, and a second claude running `decompose`), so each PR
-materializes three worktrees — the decompose pass is its own panelist process
-and worktree, not a longer prompt on an existing one. Factor that into the (PRs
-x panelists) bound.
+**Concurrency: a durable cap of 3, driven via `reserve.sh`** (the **driver**
+owns every call; the sub-agent never touches it; `reserve.sh --help` has the
+full verb list). The lease table is the whole in-flight truth, so there's no
+`{PR -> agent}` map to carry across a compaction. The driver loop:
+
+- **Gate** each candidate with `reserve {num} {head}` → `ok` dispatch, `full`
+  stop this tick, `held` skip. `held` also masks a PR the Step-1 prefilter
+  mislabels NEW/UPDATED mid-review (its `head=` marker lands only when the
+  review finishes).
+- **`release {num}`** on every sub-agent return and on a failed dispatch; TTL is
+  only a crash backstop.
+- **Reconcile each sweep** — the two gaps `reserve.sh` can't see for itself: (1)
+  if the driver compacted between a return and its `release`, `list` and
+  `release` any leased PR the prefilter now reports SEEN at its lease head; (2)
+  the lease means "slot held", not "panel produced output", so re-dispatch any
+  in-flight panel with no live process and an empty out-dir (worktree-lock
+  contention drops one occasionally) **under its existing lease** — don't
+  re-`reserve`, which returns `held`.
+
+A resting sub-agent is usually slow, not dead (decompose runs 10-15 min): WAIT
+and check live PR state before re-dispatching, or you race a duplicate panel and
+summary. Full cross-tick model in `OPERATING.md`.
 
 The skill never checks out a PR into your working tree; the diff arrives over
 the GitHub API via `gh`, so nothing here scales with PR size. The review path
@@ -483,6 +493,14 @@ So the reaction alone tells a watcher the outcome: 🚀 = approved, 👀 = comme
 worth addressing. Reactions dedupe per actor+content, so the swap is idempotent
 on an UPDATED re-review.
 
+**Stale 🚀 on a re-review that downgrades.** A PR can be approved (🚀), then the
+author pushes again and it re-surfaces as UPDATED at a new head still carrying
+the 🚀 from the old head. If the new verdict stays approve, the 🚀 is correct
+and re-posting it is a dedup no-op. If it **downgrades** to do-not-approve,
+`settle comments` clears that stale 🚀 for you — it deletes the bot's own rocket
+and leaves the 👀 — so the reaction never advertises a withdrawn approval (no
+manual `gh api -X DELETE` needed).
+
 Return to the sweep:
 `#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [human-review: {surfaces or none}]`.
 The trailing tags let the sweep show panel breadth and the human-review flag
@@ -510,23 +528,70 @@ a glance whether a review was a full multi-model panel or a thinner single-CLI
 run; the Human column surfaces which approved PRs still want a human sign-off,
 so a clean 🚀 on sensitive code is not mistaken for "no one needs to look."
 
-## Loop semantics (when driven by /loop or /schedule)
+## Sweep cadence (local cron is primary; `/loop` is the fallback)
 
-`/loop` owns cadence; one invocation is one full sweep. **Default dynamic-mode
-delay: every ~5 minutes — use `270s` on every tick**, whether the board is idle,
-freshly reviewed, or has PRs deferred on pending CI. A 5-minute cadence keeps
-new and updated PRs picked up promptly and catches CI as it goes green. Use
-`270s`, not a literal `300s`: 270s sits just under the 5-minute prompt-cache TTL
-so each tick stays cache-warm, whereas 300s pays a cache miss without buying a
-longer wait. Only stretch past this (toward `1200s`+) if you have a specific
+**Primary: a local cron fires one self-draining sweep every ~5 minutes.** A
+launchd job (or crontab) runs `claude -p "/bot-panel-review-loop"` headless;
+each fire is one self-contained sweep that runs to completion and exits, so the
+driver carries no state between fires — all of it is durable (completed reviews
+in GitHub `head=` markers, in-flight reviews in the `reserve.sh` lease table).
+Each fire:
+
+1. `reserve.sh sweep-lock 600` — if it prints `busy`, a previous sweep is still
+   draining → **exit immediately** (overlapping 5-minute fires become no-ops).
+   If it prints `ok <token>`, keep that token for renew/unlock.
+2. Drain: run Step 1, `reserve` candidates up to the cap, dispatch, wait for
+   completions and `release` each, top up — repeating until no actionable PRs
+   and no active leases remain. Reconcile and `sweep-renew <token> 600` each
+   round.
+3. `reserve.sh sweep-unlock <token>`; exit.
+
+It must run **locally** — the panel CLIs, the git worktrees, and the lease DB
+are all on this machine; `/schedule` (which runs in the cloud) cannot see them.
+The cron wrapper, where two env vars are load-bearing:
+
+```bash
+#!/usr/bin/env bash
+# launchd StartInterval=300  (or cron: */5 * * * *)
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0   # REQUIRED: default 10m would cut off a 15m panel
+export BASH_MAX_TIMEOUT_MS=600000               # headroom for any long bash in a sub-agent
+cd /path/to/target-repo
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/bot-panel-review-loop"
+mkdir -p "$state_dir"
+timeout_bin="$(command -v timeout || command -v gtimeout || true)"
+if [[ -z "$timeout_bin" ]]; then
+  echo "Install GNU coreutils for timeout/gtimeout (macOS: brew install coreutils)" >&2
+  exit 1
+fi
+"$timeout_bin" 5400 claude -p "/bot-panel-review-loop" \
+  --permission-mode acceptEdits \
+  --allowedTools "Bash,Read,Grep,Glob,Skill,Agent,TodoWrite" \
+  >> "$state_dir/sweep.log" 2>&1
+```
+
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` is mandatory: without it `claude -p`
+stops waiting on a background review after 10 minutes and cuts the sweep off
+mid-panel. The wrapper accepts GNU `timeout` on Linux or `gtimeout` from
+coreutils on macOS. The sweep-lock TTL must exceed both the cron interval and
+the `sweep-renew` period (lock `600`s, renew every ~`120`s during the drain with
+the acquired token) or two live sweeps overlap and each enforces its own cap. A
+crashed sweep kills its session-scoped sub-agents, and both its leases and its
+sweep-lock expire by TTL, so a later fire never runs against still-live
+sub-agents.
+
+**Fallback: `/loop` (interactive, dynamic self-pacing).** `/loop` owns cadence;
+one invocation is one full sweep, and the same `reserve.sh` gate applies (a
+single persistent driver can't overlap itself, so it needs no sweep-lock).
+**Default dynamic-mode delay: every ~5 minutes — use `270s` on every tick**,
+whether the board is idle, freshly reviewed, or has PRs deferred on pending CI.
+Use `270s`, not a literal `300s`: 270s sits just under the 5-minute prompt-cache
+TTL so each tick stays cache-warm, whereas 300s pays a cache miss without buying
+a longer wait. Only stretch past this (toward `1200s`+) if you have a specific
 reason to back off and the user has not asked for the 5-minute default. Inherit
-the session model; never pin one.
-
-`/loop` keeps one continuous context — tokens accumulate across ticks and only
-shrink via auto-compaction. This skill keeps the main context tiny anyway (heavy
-review work lives in discarded per-PR subagents; the sweep only retains the
-prefilter's compact output plus the per-PR verdicts). For a genuinely fresh
-context every tick, drive it with `/schedule` (a cron routine) instead — each
-run is a new session, which works here because all NEW/UPDATED/SEEN state lives
-in the GitHub head markers, not in conversation memory. The trade is
-fixed-interval cron vs `/loop`'s dynamic self-pacing.
+the session model; never pin one. A sub-agent completion also wakes the loop
+immediately and frees a slot, so the 270s timer is just the steady heartbeat
+between them. `/loop` keeps one continuous context — tokens accumulate and only
+shrink via auto-compaction — but that is now safe: the in-flight set is durable
+in the lease table, not conversation memory, so a compaction can't lose track of
+a review already in flight. `OPERATING.md` in this directory is the full
+operating model.

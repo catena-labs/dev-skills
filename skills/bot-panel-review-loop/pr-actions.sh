@@ -23,7 +23,9 @@
 #
 #   settle <num> approve|comments
 #       Terminal reaction (Step 4d). approve → drop our eyes, add rocket.
-#       comments → leave eyes in place (no-op). Never 👎.
+#       comments → leave eyes in place AND delete any stale rocket WE posted on a
+#       prior approve, so a re-review that downgrades to do-not-approve stops
+#       advertising the withdrawn approval. Never 👎.
 #
 #   threads <num>      Every inline review thread already on the PR, one TSV row
 #                      each: `resolved|open <TAB> path <TAB> body[:100]`. Reads
@@ -56,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     --repo)  REPO="${2:-}"; shift 2 ;;
     --start) START="${2:-}"; shift 2 ;;
     --side)  SIDE="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "pr-actions.sh: unknown flag: $1" >&2; exit 2 ;;
     *) args+=("$1"); shift ;;
   esac
@@ -118,7 +120,20 @@ case "$verb" in
           && echo "pr-actions.sh: settled #$num eyes -> rocket" >&2
         ;;
       comments)
-        echo "pr-actions.sh: left eyes on #$num (do-not-approve)" >&2
+        # Leave 👀 in place ("see my comments"). Also clear any stale 🚀 WE
+        # posted on a prior approve at an older head: when a re-review downgrades
+        # to do-not-approve, the old rocket must not keep advertising the
+        # withdrawn approval. Scoped to our own rocket, so a human's 🚀 is
+        # untouched; a no-op when there is nothing to clear (the common case).
+        me="$(gh api user -q .login)"
+        rid="$(gh api "repos/$REPO/issues/$num/reactions" --paginate -H "Accept: application/vnd.github+json" \
+          -q ".[] | select(.user.login==\"$me\" and .content==\"rocket\") | .id" | head -n1)"
+        if [[ -n "$rid" ]]; then
+          gh api "repos/$REPO/issues/$num/reactions/$rid" --method DELETE >/dev/null 2>&1 \
+            && echo "pr-actions.sh: left eyes on #$num, cleared stale rocket (downgraded to do-not-approve)" >&2
+        else
+          echo "pr-actions.sh: left eyes on #$num (do-not-approve)" >&2
+        fi
         ;;
       *) echo "pr-actions.sh: settle needs approve|comments" >&2; exit 2 ;;
     esac
