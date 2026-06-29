@@ -32,6 +32,66 @@ npx skills add catena-labs/dev-skills --skill optimize-agents-md
 | [triage-pr-comments](./skills/triage-pr-comments)       | Triage every review comment on a PR — verdict per comment, then fix, push, and reply on GitHub                                                      |
 | [walkmethrough](./skills/walkmethrough)                 | Interactive manual-QA of the current branch — the agent watches dev-server logs and the local DB while you run each test step                       |
 
+## Quiet `/loop` notifications (cmux)
+
+[`babysit`](./skills/babysit) and [`babysit-prs`](./skills/babysit-prs) start a
+tick's status line with a `[QUIET]` marker when the tick needed no human
+attention (they only report or do self-contained auto-fixes). A tick that needs
+you — a stop-and-ask, a reply awaiting approval, a change worth a look — is left
+unmarked. On its own the marker is just text; pair it with a notification filter
+so your terminal only pings you for the ticks that matter.
+
+If you run your loops in [cmux](https://cmux.com), add a notification hook that
+mutes any notification whose body starts with the marker, while letting
+needs-input / permission / error notifications through loud. It keys on the
+notification body, so it works for any agent (Claude, Codex, …) whose loop emits
+the marker.
+
+1. Save this as `~/.config/cmux/notify-filter.sh` and `chmod +x` it:
+
+   ```bash
+   #!/usr/bin/env bash
+   # Mute cmux notifications whose body starts with [QUIET] (also [SILENT]/[NO-OP]) —
+   # the marker babysit/babysit-prs put on no-op /loop ticks. Everything else
+   # (needs-input, permission, errors, unmarked completions) stays loud.
+   # Fail-safe: echoes stdin unchanged on any error or if jq is missing.
+   set -uo pipefail
+   input="$(cat)"
+   command -v jq >/dev/null 2>&1 || { printf '%s' "$input"; exit 0; }
+   mute="$(printf '%s' "$input" | jq -r '
+     (.notification.body // "" | ascii_downcase)
+     | if test("^[[:space:]>*_`-]*\\[(quiet|silent|no-?op)\\]") then "1" else "0" end
+   ' 2>/dev/null || echo 0)"
+   if [ "$mute" = "1" ]; then
+     printf '%s' "$input" | jq -c '.effects.desktop=false|.effects.sound=false|.effects.paneFlash=false|.effects.reorderWorkspace=false|.effects.markUnread=false' 2>/dev/null || printf '%s' "$input"
+   else
+     printf '%s' "$input"
+   fi
+   ```
+
+2. Register the hook in `~/.config/cmux/cmux.json` (use the script's absolute
+   path):
+
+   ```jsonc
+   {
+     "notifications": {
+       "hooks": [
+         {
+           "id": "loop-quiet-filter",
+           "command": "/Users/you/.config/cmux/notify-filter.sh",
+           "timeoutSeconds": 10,
+         },
+       ],
+     },
+   }
+   ```
+
+3. Apply it: `cmux reload-config`.
+
+Now no-op loop ticks land silently in cmux's notification history (the filter
+leaves `record` on) while anything that needs you still rings. To confirm, run a
+loop and watch: a `[QUIET]` tick stays quiet, a stop-and-ask pings.
+
 ## License
 
 MIT
