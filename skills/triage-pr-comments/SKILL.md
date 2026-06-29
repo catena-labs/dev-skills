@@ -310,11 +310,11 @@ After presenting all analyses, print a summary table:
 ## Step 4: Interactive Resolution
 
 > **Autonomous callers skip this step.** This walkthrough is the human-driven
-> path. An autonomous caller (e.g. the `babysit` skill running under `/loop`)
-> applies its own fix-selection policy instead — typically: auto-apply clear,
-> mechanical Fix verdicts; defer redesigns, scope changes, and anything touching
-> auth/money/schema to a human — then goes straight to Step 5, which is written
-> to run with or without this walkthrough in front of it.
+> path. An autonomous caller running under `/loop` applies its own fix-selection
+> policy instead — typically: auto-apply clear, mechanical Fix verdicts; defer
+> redesigns, scope changes, and anything touching auth/money/schema to a human —
+> then goes straight to Step 5, which is written to run with or without this
+> walkthrough in front of it.
 
 After presenting results, use **AskUserQuestion**:
 
@@ -401,12 +401,12 @@ If **"done"**: end the skill.
 
 This is the **reply/resolve entry point**, and it is mode-agnostic: the
 mechanics below are identical whether they run after the interactive walkthrough
-(Step 4) or are driven non-interactively by an autonomous caller such as
-`babysit`. Only the **reply-approval policy** differs — an interactive session
-carries the user's implicit per-fix approval from Step 4, whereas an autonomous
-caller applies its own gate (e.g. `babysit` drafts human-facing replies for
-approval and auto-posts only bot replies). The push → reply → resolve ordering,
-the read-back verification, and the error handling are the same in both modes.
+(Step 4) or are driven non-interactively by an autonomous caller. Only the
+**reply-approval policy** differs — an interactive session carries the user's
+implicit per-fix approval from Step 4, whereas an autonomous caller applies its
+own gate (e.g. it drafts human-facing replies for approval and auto-posts only
+bot replies). The push → reply → resolve ordering, the read-back verification,
+and the error handling are the same in both modes.
 
 After all fixes are implemented and verified (tests pass, linter clean):
 
