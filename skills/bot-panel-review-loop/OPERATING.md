@@ -208,9 +208,10 @@ timeout 5400 claude -p "/bot-panel-review-loop" \
 
 1. Install on `PATH` and authenticate: `codex`, `claude`, `gh` (for the target
    repo), and **`sqlite3`** (ships on macOS and every Linux; the lease DB needs
-   it). The skill pins the panel to `claude + codex + claude/decompose`, so
-   opencode is excluded automatically — no `PANEL_REVIEW_PANELISTS` setup
-   needed.
+   it — if missing, `brew install sqlite` on macOS or `apt-get install sqlite3`
+   on Debian/Ubuntu). The skill pins the panel to
+   `claude + codex + claude/decompose`, so opencode is excluded automatically —
+   no `PANEL_REVIEW_PANELISTS` setup needed.
 2. `cd` into the target repo (e.g. `catena-labs/bank`).
 3. Install the local cron (see "Cron setup" above): a launchd/crontab job that
    runs `claude -p "/bot-panel-review-loop"` every ~5 min with
