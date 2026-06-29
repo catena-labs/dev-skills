@@ -3,8 +3,8 @@
 #
 # Emits one compact JSON digest of the ONE PR this branch is on (or the PR
 # passed via --pr) so the coding agent spends tokens on fixes, not on
-# data-gathering. This is the single-PR sibling of babysit-prs/scan.sh: same
-# deterministic work — roll up CI, extract just the error signature from
+# data-gathering. It does the deterministic work — roll up CI, extract just the
+# error signature from
 # failing-check logs, count unresolved human review threads, scan root-level
 # comments, bucket for routing, recommend the next /loop delay — but for one PR
 # instead of the whole fleet. The script never commits, pushes, merges, or
@@ -34,7 +34,7 @@
 #     }
 #   }
 #
-# Unlike babysit-prs, drafts are NOT excluded: you invoked this skill on the PR
+# Drafts are NOT excluded: you invoked this skill on the PR
 # you are sitting on, so it works the PR whether or not it is a draft. isDraft is
 # carried through so the agent can mention it.
 #

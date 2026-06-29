@@ -202,6 +202,24 @@ whole point: `HAS_COMMENTS` fires on
 - Inherit the session model; never pin one. Subagents doing conflict resolution
   should inherit too (it is judgment work, not grunt work).
 
+## Tick output: mark quiet ticks `[QUIET]`
+
+End every tick with a one-line status. When the tick needed **no human
+attention**, make that status line _start_ with the literal marker `[QUIET]`:
+
+- **`[QUIET]`** — `anythingToDo` was false, or you only did self-contained
+  auto-fixes that need no review (mechanical CI fix pushed, no-action gate
+  acked, behind-but-green left alone). e.g.
+  `[QUIET] #42 green, 1 known gate unchanged — sleeping 1800s`.
+- **No marker (stays loud)** — you stopped to ask the user (any
+  `AskUserQuestion`), drafted a reply awaiting approval, pushed a change you
+  want eyes on, or hit a stop-and-ask trigger. Just report normally.
+
+A `/loop` notifier can match the leading marker to silence quiet ticks while
+letting the loud ones through. It is plain text, so it is harmless when no
+notifier reads it — never skip real reporting to earn the marker, and never mark
+a tick `[QUIET]` when you asked the user something.
+
 ## Stop-and-ask triggers
 
 - Reviewer asks for a design/architecture change
