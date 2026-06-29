@@ -21,7 +21,6 @@ npx skills add catena-labs/dev-skills --skill optimize-agents-md
 | Skill                                                   | Description                                                                                                                                         |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [babysit](./skills/babysit)                             | Babysit the single PR you're on — keep it mergeable, CI green, and review comments triaged on a `/loop`, acting only when it needs it               |
-| [babysit-prs](./skills/babysit-prs)                     | Sweep all your open non-draft PRs on a `/loop` — keep them mergeable, CI green, and review comments triaged, acting only on the PRs that need it    |
 | [bot-panel-review-loop](./skills/bot-panel-review-loop) | Sweep a repo's open PRs — one fresh agent per PR runs a gather-only panel review and posts advisory findings to GitHub. Read-only; built for /loop  |
 | [commandments](./skills/commandments)                   | Audit a branch, PR, or uncommitted changes against your project's COMMANDMENTS.md — worked checklist with file:line findings and concrete fixes     |
 | [optimize-agents-md](./skills/optimize-agents-md)       | Optimize your AGENTS.md (and CLAUDE.md) files according to best practices. Works with monorepos, too                                                |
@@ -34,12 +33,12 @@ npx skills add catena-labs/dev-skills --skill optimize-agents-md
 
 ## Quiet `/loop` notifications (cmux)
 
-[`babysit`](./skills/babysit) and [`babysit-prs`](./skills/babysit-prs) start a
-tick's status line with a `[QUIET]` marker when the tick needed no human
-attention (they only report or do self-contained auto-fixes). A tick that needs
-you — a stop-and-ask, a reply awaiting approval, a change worth a look — is left
-unmarked. On its own the marker is just text; pair it with a notification filter
-so your terminal only pings you for the ticks that matter.
+[`babysit`](./skills/babysit) starts a tick's status line with a `[QUIET]`
+marker when the tick needed no human attention (it only reports or does
+self-contained auto-fixes). A tick that needs you — a stop-and-ask, a reply
+awaiting approval, a change worth a look — is left unmarked. On its own the
+marker is just text; pair it with a notification filter so your terminal only
+pings you for the ticks that matter.
 
 If you run your loops in [cmux](https://cmux.com), add a notification hook that
 mutes any notification whose body starts with the marker, while letting
@@ -52,7 +51,7 @@ the marker.
    ```bash
    #!/usr/bin/env bash
    # Mute cmux notifications whose body starts with [QUIET] (also [SILENT]/[NO-OP]) —
-   # the marker babysit/babysit-prs put on no-op /loop ticks. Everything else
+   # the marker babysit puts on no-op /loop ticks. Everything else
    # (needs-input, permission, errors, unmarked completions) stays loud.
    # Fail-safe: echoes stdin unchanged on any error or if jq is missing.
    set -uo pipefail

@@ -3,9 +3,8 @@
 Keep the **single PR you're on** healthy on a recurring loop: the current
 branch's PR mergeable, CI green, and review comments triaged. One invocation is
 one pass — it starts with a single read-only scan, acts only if the PR actually
-needs something, and otherwise reports and sleeps. This is the single-PR sibling
-of [babysit-prs](../babysit-prs); use it when you're parked on one PR and want
-just that PR watched.
+needs something, and otherwise reports and sleeps. Use it when you're parked on
+one PR and want just that PR watched.
 
 ## Install
 
@@ -34,8 +33,8 @@ It operates on the PR for the current branch by default; pass `--pr N` to the
 scanner to target another. It needs the `gh` CLI authenticated, plus `jq`, and
 assumes you're inside the target git repo (or pass `--repo owner/name`).
 
-> Run it as `/loop /babysit`, not by nesting `/babysit-prs` inside it — each is
-> its own loop, and two schedulers will fight over the session's one wakeup.
+> Run it as `/loop /babysit` — don't nest another scheduler loop inside it, or
+> two schedulers will fight over the session's one wakeup.
 
 ## What it does
 
@@ -72,8 +71,8 @@ assumes you're inside the target git repo (or pass `--repo owner/name`).
   they stop re-surfacing every tick; a later reviewer reply mints a fresh
   signature and the thread comes back on its own. Replies to a human reviewer
   are still drafted for your approval first.
-- **Works drafts too.** Unlike `babysit-prs`, it doesn't skip a draft PR — you
-  invoked it on the PR you're sitting on. It still never rewrites history.
+- **Works drafts too.** It doesn't skip a draft PR — you invoked it on the PR
+  you're sitting on. It still never rewrites history.
 - **Stops and asks at the right moments.** Design/architecture change requests,
   conflicts with genuinely divergent intent, anything that would rewrite history
   on a non-draft PR, and CI fixes touching auth/money/schema all pause for you —
@@ -86,4 +85,4 @@ assumes you're inside the target git repo (or pass `--repo owner/name`).
 - **The seen-ledger is local state**, at
   `${XDG_STATE_HOME:-$HOME/.local/state}/babysit/<owner>-<name>.json`, written
   only by `mark-seen.sh`. Deleting it just means every still-open thread
-  re-surfaces once. It is separate from babysit-prs's ledger.
+  re-surfaces once.
