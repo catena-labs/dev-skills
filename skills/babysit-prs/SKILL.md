@@ -176,6 +176,24 @@ actionable and does not make the PR busy. You ack threads with `mark-seen.sh`
 - Inherit the session model; never pin one. Subagents doing conflict resolution
   should inherit too (it is judgment work, not grunt work).
 
+## Sweep output: mark quiet sweeps `[QUIET]`
+
+End every sweep with a one-line status. When the sweep needed **no human
+attention**, make that status line _start_ with the literal marker `[QUIET]`:
+
+- **`[QUIET]`** — `anythingToDo` was false, or you only did self-contained
+  auto-fixes that need no review (mechanical CI fix pushed, no-action gate
+  acked, behind-but-green PRs left alone). e.g.
+  `[QUIET] 5 PRs green, #957 3 known gates unchanged — sleeping 1800s`.
+- **No marker (stays loud)** — you stopped to ask the user (any
+  `AskUserQuestion`), drafted a reply awaiting approval, pushed a change you
+  want eyes on, or hit a stop-and-ask trigger on any PR. Just report normally.
+
+A `/loop` notifier can match the leading marker to silence quiet sweeps while
+letting the loud ones through. It is plain text, so it is harmless when no
+notifier reads it — never skip real reporting to earn the marker, and never mark
+a sweep `[QUIET]` when you asked the user something.
+
 ## Stop-and-ask triggers
 
 - Reviewer asks for a design/architecture change
