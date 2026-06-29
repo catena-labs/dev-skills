@@ -10,7 +10,7 @@ description:
 
 One invocation = one fleet-wide sweep of the user's open **non-draft** PRs.
 Designed to be driven by `/loop /babysit-prs` (dynamic mode). Do NOT invoke
-/monitor-pr from inside this skill: it is its own single-PR loop and the two
+/babysit from inside this skill: it is its own single-PR loop and the two
 schedulers will fight over the session's single wakeup.
 
 ## Scan first (one read-only command)
@@ -190,7 +190,7 @@ actionable and does not make the PR busy. You ack threads with `mark-seen.sh`
 | Sweeping drafts in "while I'm at it"        | Drafts are the author's WIP; report only                                                                                       |
 | Rebase + force-with-lease on an approved PR | Ready PRs get merge commits or appended fixes                                                                                  |
 | Updating every behind-main branch           | No-conflict, green, no up-to-date gate = leave it                                                                              |
-| Calling /monitor-pr per PR                  | Nested loops fight over scheduling; inline the checks                                                                          |
+| Calling /babysit per PR                     | Nested loops fight over scheduling; inline the checks                                                                          |
 | Replying to a human reviewer autonomously   | Draft + user approval first                                                                                                    |
 | Re-fetching PR/CI/thread state by hand      | The scanner already gathered it; read the digest                                                                               |
 | Re-triaging the same gate every tick        | Ack no-action threads with `mark-seen.sh`; `newThreads` drives `HAS_COMMENTS`                                                  |

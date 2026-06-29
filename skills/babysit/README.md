@@ -34,9 +34,8 @@ It operates on the PR for the current branch by default; pass `--pr N` to the
 scanner to target another. It needs the `gh` CLI authenticated, plus `jq`, and
 assumes you're inside the target git repo (or pass `--repo owner/name`).
 
-> Run it as `/loop /babysit`, not by nesting `/monitor-pr` or `/babysit-prs`
-> inside it — each is its own loop, and two schedulers will fight over the
-> session's one wakeup.
+> Run it as `/loop /babysit`, not by nesting `/babysit-prs` inside it — each is
+> its own loop, and two schedulers will fight over the session's one wakeup.
 
 ## What it does
 

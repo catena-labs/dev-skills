@@ -31,9 +31,9 @@ You can also kick off a single one-off sweep by just asking:
 It needs the `gh` CLI authenticated, plus `jq`, and assumes you're inside the
 target git repo (or pass `--repo owner/name` to the scanner).
 
-> Run it as `/loop /babysit-prs`, not by nesting `/monitor-pr` inside it —
-> `/monitor-pr` is its own single-PR loop, and two schedulers will fight over
-> the session's one wakeup.
+> Run it as `/loop /babysit-prs`, not by nesting `/babysit` inside it —
+> `/babysit` is its own single-PR loop, and two schedulers will fight over the
+> session's one wakeup.
 
 ## What it does
 
