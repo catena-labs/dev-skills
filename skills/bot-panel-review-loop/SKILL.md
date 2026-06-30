@@ -21,7 +21,7 @@ the actionable PRs, then **dispatches one fresh agent per PR** to review it and
 post advisory comments back. **This skill never changes the code** — no edits,
 no commits, no pushes. Its only side effects are GitHub reactions and comments.
 
-Three bundled scripts carry every deterministic, no-judgment step so the bulky
+Four bundled scripts carry every deterministic, no-judgment step so the bulky
 `gh`/`jq`/`graphql` plumbing never enters the model's context and the JSON is
 never hand-escaped:
 
@@ -34,6 +34,11 @@ never hand-escaped:
 - **`pr-actions.sh`** (Step 4) — per-PR GitHub calls: re-confirm live state,
   react, fetch existing threads, post comments, post the summary, settle the
   reaction. Run `bash <skill-dir>/pr-actions.sh --help` for the verb list.
+- **`metrics.sh`** (Steps 4-6) — SQLite effectiveness ledger for panelists:
+  which findings each reviewer raised, which survived verification, which were
+  posted or already covered, which were missed, and which the PR owner later
+  fixed or acknowledged. Run `bash <skill-dir>/metrics.sh --help` for the verb
+  list.
 
 The model keeps the judgment (which findings are real, the verdict, the comment
 and summary bodies); the scripts keep the plumbing.
@@ -136,8 +141,9 @@ One fresh isolated context per PR, done as subagents: the sweep stays cheap and
 each PR gets clean, uncontaminated context. Each agent owns exactly one PR, does
 Steps 4a-4d, and returns a one-line verdict. Inherit the session model — don't
 pin one; the judgment (which findings are real, the verdict) wants the strong
-model. The subagent doesn't load this skill, so **pass it the absolute path to
-`pr-actions.sh`** (the same `<skill-dir>` from Step 1) along with the brief.
+model. The subagent doesn't load this skill, so **pass it the absolute paths to
+`pr-actions.sh` and `metrics.sh`** (the same `<skill-dir>` from Step 1) along
+with the brief.
 
 **Concurrency: a durable cap of 3, driven via `reserve.sh`** (the **driver**
 owns every call; the sub-agent never touches it; `reserve.sh --help` has the
@@ -205,6 +211,14 @@ re-review is a no-op:
 bash <skill-dir>/pr-actions.sh react {number}    # adds 👀
 ```
 
+Start the metrics run after `confirm ok` and before launching the panel. This
+records an attempted review even if a panelist later fails, and gives every
+finding a stable run id:
+
+```bash
+run_id="$(bash <skill-dir>/metrics.sh run-start {number} {head} {NEW|UPDATED})"
+```
+
 Then invoke the **`panel-review`** skill via the Skill tool, targeting the PR
 with the panel pinned to three panelists — `claude` and `codex` each doing a
 standard whole-diff review, plus a second `claude` running the `decompose`
@@ -244,6 +258,17 @@ many models ran) and the decompose pass, never with rounds (a `--pr` review is
 one pass). If only one panelist ran, say so in the summary — a single panelist
 is a thinner signal than a true multi-model panel.
 
+Record every panelist heartbeat in the metrics DB. Use the heartbeat id exactly
+as reported (`claude`, `codex`, `claude-decompose`), the self-reported model,
+the approach (`standard` or `decompose`), and `contributed` only for panelists
+that produced usable output. Record non-zero exits or empty output as `failed`;
+record expected panelists that never started as `missing` if you can tell:
+
+```bash
+bash <skill-dir>/metrics.sh panelist "$run_id" claude "opus-4.8" standard contributed 0
+bash <skill-dir>/metrics.sh panelist "$run_id" claude-decompose "opus-4.8" decompose failed 1
+```
+
 **Verify before you stand on a finding.** Review depth comes from the panel
 itself now — two models doing holistic reviews plus a third running the
 decompose deep pass — so there is no per-PR tier to choose and no decomposition
@@ -265,6 +290,24 @@ HIGH / non-consensus MEDIUM before recommending; LOW is polish (forego by
 default). severity = trigger probability x consequence; narrow or self-healing
 edges are LOW. Auth, money (`@bank/money`, `services/transfers.ts`), and
 schema/migration findings warrant extra weight per the repo's CLAUDE.md.
+
+Record each **distinct synthesized candidate** in the metrics ledger before you
+apply FIX/FOREGO. The source list is the comma-separated panelist ids that
+raised the finding; this is the canonical "how many findings each reviewer
+found" signal. Then update the same finding id with verification and judgment:
+
+```bash
+read -r finding_id _ < <(bash <skill-dir>/metrics.sh finding "$run_id" HIGH apps/api/src/foo.ts 42 "missing authz check" "call requirePermission before loading the record" "codex,claude-decompose" auth)
+bash <skill-dir>/metrics.sh verify "$finding_id" verified "refute pass confirmed unauthenticated path"
+bash <skill-dir>/metrics.sh judge "$finding_id" fix "HIGH auth issue"
+```
+
+If a candidate is a false positive, still record it and mark it
+`false_positive`; if it is real but not worth posting, mark it `verified` plus
+`forego` with the reason. Those negative labels are what make reviewer precision
+measurable instead of just volume. The metrics rollup also counts a missed
+opportunity for each contributed panelist that did **not** raise a verified FIX
+finding another panelist raised, so consensus gaps become visible.
 
 **NEW and UPDATED both review the whole PR.** There is no incremental scope: an
 UPDATED PR (new commits since the last review) is re-reviewed end to end,
@@ -379,6 +422,14 @@ bash <skill-dir>/pr-actions.sh comment {number} apps/api/src/foo.ts 42 --start 4
 
 The script prints `posted` on success or `offdiff` when GitHub 422s the line —
 on `offdiff`, drop that finding into the summary's off-diff section instead.
+Update the metrics row at the same time: `posted` for a new inline comment,
+`covered` when an existing open/resolved thread already made the same point,
+`offdiff` when the script 422-folded it into the summary, and `summary` for a
+structural finding intentionally kept out of inline comments.
+
+```bash
+bash <skill-dir>/metrics.sh publish "$finding_id" posted "inline comment posted"
+```
 
 Then write the summary + verdict as one issue comment. This body and the inline
 comments go to GitHub, so keep them em-dash-free (colons, commas, parens) per
@@ -392,6 +443,14 @@ overwritten one:
 
 ```bash
 bash <skill-dir>/pr-actions.sh summary {number} /tmp/bot-panel-review-loop-{number}-summary.md
+```
+
+After the summary posts, close the metrics run with the same verdict, posted
+count, off-diff count, human-review surfaces, and Panel text you will return to
+the sweep:
+
+```bash
+bash <skill-dir>/metrics.sh run-finish "$run_id" approve 2 1 "auth,money" "claude (opus-4.8) standard + codex (gpt-5) standard + claude/decompose (opus-4.8)"
 ```
 
 Summary body — keep the **visible** body to just the three things a reader
@@ -502,7 +561,7 @@ and leaves the 👀 — so the reaction never advertises a withdrawn approval (n
 manual `gh api -X DELETE` needed).
 
 Return to the sweep:
-`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [human-review: {surfaces or none}]`.
+`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [human-review: {surfaces or none}] [metrics: run {run_id}]`.
 The trailing tags let the sweep show panel breadth and the human-review flag
 without re-reading each PR.
 
@@ -527,6 +586,60 @@ Keep it to signal — detailed findings live on each PR. The Panel column says a
 a glance whether a review was a full multi-model panel or a thinner single-CLI
 run; the Human column surfaces which approved PRs still want a human sign-off,
 so a clean 🚀 on sensitive code is not mistaken for "no one needs to look."
+
+For an effectiveness snapshot, run the SQLite rollup after the sweep. Do not
+paste it into every PR; it is operator telemetry:
+
+```bash
+bash <skill-dir>/metrics.sh reviewer-stats
+```
+
+## Step 6: Metrics owner-outcome sweep
+
+Once per sweep (usually before Step 1 in a cron fire, or after Step 5 in an
+interactive run), close out old metrics rows whose PR owner has now responded.
+This step is read-only toward GitHub and posts nothing:
+
+```bash
+bash <skill-dir>/metrics.sh pending-owner
+```
+
+For each pending verified FIX finding, inspect the live PR state and the thread
+or summary evidence. If the PR is still open and the owner has not acted, leave
+`owner_outcome=unknown`. Once the evidence is clear, mark exactly one outcome:
+
+- `fixed` — the owner changed code, tests, PR metadata, or docs in a later
+  commit so the finding no longer applies.
+- `acknowledged` — the owner explicitly accepted the finding or resolved the
+  thread with a clear non-code disposition.
+- `rejected` — the owner explicitly declined it, closed the PR without
+  addressing it, or merged with the finding still applicable.
+- `superseded` — a later head or later bot review replaced this finding, so it
+  should not count as accepted or rejected.
+
+Record concise evidence (commit SHA, thread URL, owner comment, or "merged with
+issue still present") so the metric can be audited:
+
+```bash
+bash <skill-dir>/metrics.sh owner 123 fixed "owner commit abc123 adds requirePermission"
+```
+
+Also record externally discovered misses: a verified issue that existed in the
+reviewed diff but no panelist raised. Typical sources are a human reviewer, CI,
+the PR owner, a later bot review, or a post-merge incident. Use this only when
+there is no existing metrics row for the same issue; it will count as missed by
+every panelist that contributed to that run. If you do not have the run id in
+context, use `metrics.sh runs {pr}` to find the run for the reviewed head:
+
+```bash
+bash <skill-dir>/metrics.sh missed "$run_id" HIGH apps/api/src/foo.ts 42 "unauthorized delete path" "require ownership before delete" human auth "human review comment linked the exploit path"
+```
+
+The useful effectiveness metrics are: found count, verified count,
+false-positive count, missed count, recall, fix-recommended count,
+posted/covered count, owner fixed-or-acknowledged count, panelist failure rate,
+and acceptance latency. The bundled rollup reports the count and rate columns;
+use the raw DB for deeper latency or severity/surface analysis if needed.
 
 ## Sweep cadence (local cron is primary; `/loop` is the fallback)
 

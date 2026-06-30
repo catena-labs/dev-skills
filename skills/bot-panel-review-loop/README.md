@@ -59,7 +59,8 @@ install it too:
 npx skills add catena-labs/dev-skills --skill panel-review
 ```
 
-You also need the GitHub CLI (`gh`) authenticated against the target repo.
+You also need `gh` authenticated against the target repo and `sqlite3` on `PATH`
+for the reservation and metrics databases.
 
 ## What it does
 
@@ -91,6 +92,13 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   re-reviews the whole PR only when it has new commits and never re-posts an
   inline finding already on the PR. Each review still leaves a fresh summary
   comment, so the PR keeps a running history of verdicts.
+- **Tracks reviewer effectiveness in SQLite.** A bundled `metrics.sh` ledger
+  records which panelist raised each synthesized finding, whether the judging
+  agent verified it, whether it was posted or already covered, and whether the
+  PR owner later fixed, acknowledged, rejected, or superseded it. It also counts
+  missed opportunities: verified findings a panelist did not raise, and
+  externally discovered issues that no panelist caught. The rollup is local
+  operator telemetry, not posted to PRs.
 
 ## What it does NOT do
 
@@ -119,3 +127,9 @@ You also need the GitHub CLI (`gh`) authenticated against the target repo.
   `claude` on `decompose`; a CLI missing from `PATH`, or one that returns a
   `done (exit N) — FAILED: …` heartbeat, silently shrinks the panel, and the
   summary's **Panel** line flags it.
+- **Metrics need a final outcome pass.** `metrics.sh pending-owner` lists
+  verified FIX findings whose owner outcome is still unknown. A later sweep
+  should mark them `fixed`, `acknowledged`, `rejected`, or `superseded` once the
+  PR owner acts or the PR merges. If a human reviewer, CI, the owner, or a later
+  review finds a real issue the panel missed, record it with
+  `metrics.sh missed ...` so reviewer recall is measurable.
