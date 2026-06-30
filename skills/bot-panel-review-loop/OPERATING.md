@@ -29,6 +29,10 @@ set live in a durable SQLite lease table (`reserve.sh`), not in conversation
 memory — so a sweep survives a context compaction or a fresh-context cron run
 alike. See "Reservations" and "Cron setup" below.
 
+Reviewer effectiveness lives in a separate SQLite metrics ledger (`metrics.sh`).
+It records finding provenance, verification, posting/dedupe, missed findings,
+and eventual PR-owner outcomes, scoped by repo and PR head.
+
 ## Operating model (the policy a driver must follow)
 
 1. **Cadence.** Under cron, each fire is one self-draining sweep that runs to
@@ -88,8 +92,9 @@ knobs (`RESERVE_CAP`/`RESERVE_TTL`/`RESERVE_DB`), and defaults live in
 | cron / `/loop`                        | Fires one sweep every ~5 min. Cron (primary): a local launchd/crontab `claude -p` run per fire. `/loop` (fallback): dynamic `ScheduleWakeup` self-pacing.                                                                                                                                                                     |
 | `/bot-panel-review-loop` (this skill) | ONE sweep: `select-prs.sh` to pick PRs, dispatch one sub-agent per PR, `pr-actions.sh` for all GitHub calls. Does NOT schedule; pins the panel via `--panelist` (claude + codex + claude/decompose). Owns the cap via `reserve.sh` (reserve at dispatch, release on sub-agent return); under cron, also holds the sweep-lock. |
 | `reserve.sh` (bundled)                | The durable cap + in-flight lease table (SQLite); driver-only (`reserve`/`release`/`sweep-lock`). The per-PR sub-agent never touches it.                                                                                                                                                                                      |
+| `metrics.sh` (bundled)                | The local SQLite effectiveness ledger: per-run panelist availability, per-finding sources, verification, publication, missed findings, and owner outcome. Per-PR sub-agents write run/finding rows; later sweeps close owner outcomes and externally discovered misses.                                                       |
 | `panel-review` skill                  | Spawns the panelist CLIs (one throwaway git worktree per panelist on the shared `.git`); honors the `--panelist` flags this skill pins.                                                                                                                                                                                       |
-| per-PR review sub-agent               | Reviews exactly one PR and posts results back. Does NOT load this skill — it only gets the brief the driver hands it plus the absolute path to `pr-actions.sh`.                                                                                                                                                               |
+| per-PR review sub-agent               | Reviews exactly one PR and posts results back. Does NOT load this skill — it only gets the brief the driver hands it plus the absolute paths to `pr-actions.sh` and `metrics.sh`.                                                                                                                                             |
 
 ## Per-PR review lifecycle (what each sub-agent does)
 
@@ -99,11 +104,44 @@ when the sub-agent returns (any outcome). The sub-agent itself does, and knows,
 none of that:
 
 `confirm <pr> <head>` (bail on skip/defer) -> `react` (adds 👀) ->
+`metrics.sh run-start` ->
 `/panel-review --pr <n> --panelist claude --panelist codex --panelist claude/decompose`
-(gather-only, run synchronously) -> judge findings + mandatory adversarial
-refute on any surviving HIGH/CRITICAL -> `threads` dedup -> post new inline FIX
-comments -> post one `summary` comment (must carry
+(gather-only, run synchronously) -> record panelist heartbeats in metrics ->
+judge findings + record sources in metrics -> mandatory adversarial refute on
+any surviving HIGH/CRITICAL -> mark verification/judgment in metrics ->
+`threads` dedup -> post new inline FIX comments and mark publication in metrics
+-> post one `summary` comment (must carry
 `<!-- bot-panel-review-loop: head=<sha> -->`) -> `settle` the reaction.
+
+## Effectiveness metrics
+
+`metrics.sh` stores reviewer-effectiveness telemetry in
+`${XDG_STATE_HOME:-~/.local/state}/bot-panel-review-loop/metrics.db` (WAL mode,
+with `-wal`/`-shm` sidecars). It is separate from the reservation DB so a stuck
+lease cannot corrupt historical effectiveness data.
+
+Record every synthesized candidate finding, including false positives and
+findings the judge foregoes. Volume alone is not useful; the important rates are
+verified/found, false positives/found, missed opportunities, recall,
+fix-recommended/verified, posted-or-covered/fix-recommended, and
+owner-fixed-or-acknowledged/fix recommended. Also record failed or missing
+panelists so availability is visible.
+
+Misses have two sources. First, the rollup counts a miss for any contributed
+panelist that did not raise a verified FIX finding another panelist raised.
+Second, if a human reviewer, CI, PR owner, later bot review, or post-merge
+incident finds a real issue that no panelist raised, record it with
+`metrics.sh missed ...`; it counts as missed by every contributed panelist in
+that run. Use `metrics.sh runs <pr>` if a later sweep needs to recover the right
+run id for a PR head.
+
+Owner outcomes are often knowable only later. Each sweep should run
+`metrics.sh pending-owner` and inspect old verified FIX findings. Mark: `fixed`
+when a later commit/metadata change addresses it, `acknowledged` when the owner
+explicitly accepts or resolves it, `rejected` when the PR merges or closes with
+the issue still applicable, and `superseded` when a later head or later bot
+finding replaces it. Use `metrics.sh reviewer-stats` for the local rollup; do
+not post this telemetry to PRs.
 
 ## Selection gates (handled by `select-prs.sh`)
 
@@ -169,9 +207,9 @@ red -> skip).
   install/sync step; the two can drift.)
 - **Lease DB + logs:**
   `${XDG_STATE_HOME:-~/.local/state}/bot-panel-review-loop/` holds
-  `reservations.db` (plus its `-wal`/`-shm` sidecars) and, for the cron
-  entrypoint, `sweep.log`. Machine-local, not in this repo — a new operator's
-  box starts empty (the table is created on first `reserve`).
+  `reservations.db` and `metrics.db` (plus their `-wal`/`-shm` sidecars) and,
+  for the cron entrypoint, `sweep.log`. Machine-local, not in this repo — a new
+  operator's box starts empty (tables are created on first use).
 
 ## Cron setup (local)
 
