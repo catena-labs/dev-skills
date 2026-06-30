@@ -181,7 +181,7 @@ review — the whole PR (the engagement label only distinguishes them in the
 report). If the entry carries a `note` (e.g. no CI checks), pass it along so the
 agent can mention it.
 
-### 4a. Re-confirm actionable, react 👀, gather findings, classify surfaces
+### 4a. Re-confirm actionable, react 👀, gather findings, classify surfaces, rate effort/risk
 
 Enumeration is a snapshot; minutes can pass before this agent runs, and a PR can
 merge, close, convert to draft, or get a fresh push in that gap. **Re-resolve
@@ -342,6 +342,48 @@ human-review note can point a reader at it. These surfaces populate the
 collapsed human-review section in the summary (4c) and the human-review flag
 returned to the sweep — they are not posted as inline comments.
 
+**Rate the PR's level of effort and risk.** Independently of the findings and of
+the verdict, assign two ratings the summary will carry (4c). They reuse the
+sensitive surfaces you just classified, so do them in the same pass:
+
+- **Effort: Low / Medium / High** — how much work the change represents. Size it
+  from the PR's own counts (changed files, added/deleted lines), how many
+  distinct areas/packages it spans, and conceptual weight (a localized tweak vs.
+  new abstractions, a migration, or a cross-cutting refactor). Pull the counts
+  cheaply rather than via a full-diff fetch:
+
+  ```bash
+  gh pr view {number} -R {owner}/{repo} --json additions,deletions,changedFiles
+  ```
+
+  Low = small and localized (a handful of files, no new concepts); Medium =
+  moderate, multi-file or one new unit of behavior; High = large, sprawling, or
+  conceptually heavy (many areas, new subsystems, a migration plus dependent
+  logic).
+
+- **Risk: Low / Medium / High / Critical** — how dangerous the change is if it
+  is wrong. **The target repo's `AGENTS.md` is the definition of risk: consult
+  it.** `Read` the repo-root `AGENTS.md` (plus any nested `AGENTS.md` for a
+  touched package) and let its CRITICAL items and sensitive surfaces drive the
+  rating — money math (`@bank/money`), auth / RBAC / permissions, schema /
+  migrations, secrets, and outbound provider movement (`services/transfers.ts`).
+  Rate off which of those surfaces the PR touches and how, not off diff size:
+  - **Low** — no sensitive surface (docs, tests, isolated UI/copy, a
+    self-contained refactor).
+  - **Medium** — touches a sensitive surface peripherally (additive,
+    non-destructive, or behind an existing gate).
+  - **High** — materially changes auth/RBAC, schema/migration, secrets, or
+    money-adjacent logic.
+  - **Critical** — directly alters money-movement math, an auth/ownership gate,
+    or an outbound provider path, or ships destructive/irreversible DDL.
+
+  When AGENTS.md's guidance and these tiers disagree, AGENTS.md wins — it is the
+  repo's own definition of risk.
+
+The two ratings are **independent of the verdict** (a one-line change to money
+math is Low effort but Critical risk) and render in the summary's visible body
+(4c). They are not inline comments and do not gate the verdict.
+
 ### 4b. Resolve the correct file + line for each finding
 
 An inline comment only lands on the right code when its anchor matches the PR
@@ -453,21 +495,23 @@ the sweep:
 bash <skill-dir>/metrics.sh run-finish "$run_id" approve 2 1 "auth,money" "claude (opus-4.8) standard + codex (gpt-5) standard + claude/decompose (opus-4.8)"
 ```
 
-Summary body — keep the **visible** body to just the three things a reader
-actually scans: the verdict, the panel (which panelists ran), and the head.
-Every findings list and the human-review note live in collapsed `<details>`
-accordions, so a reader expands only what they want. Always posted, even with
-zero inline findings. **Omit any findings accordion whose count is zero**; omit
-the human-review accordion only when no sensitive surface is touched. The blank
-line after each `<summary>` is required for GitHub to render the markdown
-inside. The `<!-- ... head= -->` marker is mandatory and must carry the current
-head — the Step 1 prefilter's engagement check reads the most recent marker, so
-it keeps working across the stacked summaries.
+Summary body — keep the **visible** body to just the four things a reader
+actually scans: the verdict, the effort/risk ratings, the panel (which panelists
+ran), and the head. Every findings list and the human-review note live in
+collapsed `<details>` accordions, so a reader expands only what they want.
+Always posted, even with zero inline findings. **Omit any findings accordion
+whose count is zero**; omit the human-review accordion only when no sensitive
+surface is touched. The blank line after each `<summary>` is required for GitHub
+to render the markdown inside. The `<!-- ... head= -->` marker is mandatory and
+must carry the current head — the Step 1 prefilter's engagement check reads the
+most recent marker, so it keeps working across the stacked summaries.
 
 ```
 ## Panel review (advisory)
 
 **Verdict: <Approve | Do not approve yet>.** <one-line reason>
+
+**Effort: <Low | Medium | High>. Risk: <Low | Medium | High | Critical>.** <one-line basis for each, e.g. "moderate multi-file change; touches RBAC permission gates">
 
 **Panel:** {name (model) per panelist, noting its approach — e.g. "claude (opus-4.8) + codex (gpt-5) standard, claude/decompose (opus-4.8)"}, at {short head}; gather-only, no code was changed. <only-if-thin: note that fewer panelists ran than expected, e.g. "only one CLI panelist was detected on PATH, so consensus is single-panelist.">
 
@@ -502,11 +546,13 @@ it keeps working across the stacked summaries.
 <!-- bot-panel-review-loop: head={headRefOid} -->
 ```
 
-The **Panel** line is mandatory: list every panelist that ran — each as
-`name (model)` and note its review approach (standard or `decompose`) — so the
-summary is self-describing about the panel's breadth and flags a thin single-CLI
-run. Everything else is collapsed by design — do not promote a findings list or
-the human-review note into the visible body.
+The **Effort/Risk** line is mandatory too: both ratings on every summary,
+assigned per 4a (effort from diff scope, risk from the repo's `AGENTS.md`
+sensitive surfaces). The **Panel** line is mandatory: list every panelist that
+ran — each as `name (model)` and note its review approach (standard or
+`decompose`) — so the summary is self-describing about the panel's breadth and
+flags a thin single-CLI run. Everything else is collapsed by design — do not
+promote a findings list or the human-review note into the visible body.
 
 **Verdict rule:** **Do not approve yet** if any FIX finding is CRITICAL/HIGH or
 a substantiated wrong-approach flag survives; **Approve** if only MEDIUM/LOW
@@ -561,31 +607,33 @@ and leaves the 👀 — so the reaction never advertises a withdrawn approval (n
 manual `gh api -X DELETE` needed).
 
 Return to the sweep:
-`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [human-review: {surfaces or none}] [metrics: run {run_id}]`.
-The trailing tags let the sweep show panel breadth and the human-review flag
-without re-reading each PR.
+`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [effort/risk: {Low|Medium|High}/{Low|Medium|High|Critical}] [human-review: {surfaces or none}] [metrics: run {run_id}]`.
+The trailing tags let the sweep show panel breadth, the effort/risk rating, and
+the human-review flag without re-reading each PR.
 
 ## Step 5: Report (in-session)
 
 The prefilter already emitted `REPORT_TABLE` — one row per open PR (unlabeled
 drafts excluded) with every skip/defer reason filled in. Take it verbatim and,
-for each `PENDING_VERDICT` row, replace the last three columns with what that
-PR's agent returned: the **Result** (verdict + finding counts), the **Panel**
-(which panelists ran), and the **Human** column (human-review surfaces, or
-blank). Skip and defer rows are already final.
+for each `PENDING_VERDICT` row, replace the last four columns with what that
+PR's agent returned: the **Result** (verdict + finding counts), the
+**Effort/Risk** rating (e.g. "Medium / High"), the **Panel** (which panelists
+ran), and the **Human** column (human-review surfaces, or blank). Skip and defer
+rows are already final.
 
-| PR   | Title           | Engagement | Result                          | Panel                               | Human |
-| ---- | --------------- | ---------- | ------------------------------- | ----------------------------------- | ----- |
-| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | claude+codex+claude/decompose       | auth  |
-| #905 | fee preview     | UPDATED    | approve (clean)                 | claude+claude/decompose (codex n/a) | money |
-| #906 | bump deps       | -          | dependabot → skipped            | -                                   | -     |
-| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -                                   | -     |
-| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -                                   | -     |
+| PR   | Title           | Engagement | Result                          | Effort/Risk   | Panel                               | Human |
+| ---- | --------------- | ---------- | ------------------------------- | ------------- | ----------------------------------- | ----- |
+| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | Medium / High | claude+codex+claude/decompose       | auth  |
+| #905 | fee preview     | UPDATED    | approve (clean)                 | Low / Medium  | claude+claude/decompose (codex n/a) | money |
+| #906 | bump deps       | -          | dependabot → skipped            | -             | -                                   | -     |
+| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -             | -                                   | -     |
+| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -             | -                                   | -     |
 
-Keep it to signal — detailed findings live on each PR. The Panel column says at
-a glance whether a review was a full multi-model panel or a thinner single-CLI
-run; the Human column surfaces which approved PRs still want a human sign-off,
-so a clean 🚀 on sensitive code is not mistaken for "no one needs to look."
+Keep it to signal — detailed findings live on each PR. The Effort/Risk column
+shows each PR's size and danger at a glance; the Panel column says whether a
+review was a full multi-model panel or a thinner single-CLI run; the Human
+column surfaces which approved PRs still want a human sign-off, so a clean 🚀 on
+sensitive code is not mistaken for "no one needs to look."
 
 For an effectiveness snapshot, run the SQLite rollup after the sweep. Do not
 paste it into every PR; it is operator telemetry:

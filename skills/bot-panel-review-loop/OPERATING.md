@@ -10,9 +10,9 @@ a single sweep see `SKILL.md` in this directory.
 it selects the actionable ones and dispatches **one fresh review sub-agent per
 PR**. Each sub-agent runs a multi-model `panel-review` (three panelists:
 claude + codex standard, plus a second claude on `decompose`), posts advisory
-inline comments plus one summary comment, and settles a GitHub reaction. The
-loop **never changes code** — its only side effects are GitHub comments and
-reactions.
+inline comments plus one summary comment (carrying an effort/risk rating
+alongside the verdict), and settles a GitHub reaction. The loop **never changes
+code** — its only side effects are GitHub comments and reactions.
 
 It is driven by a **local cron** (the primary entrypoint) or, interactively, by
 `/loop`:
@@ -108,9 +108,10 @@ none of that:
 `/panel-review --pr <n> --panelist claude --panelist codex --panelist claude/decompose`
 (gather-only, run synchronously) -> record panelist heartbeats in metrics ->
 judge findings + record sources in metrics -> mandatory adversarial refute on
-any surviving HIGH/CRITICAL -> mark verification/judgment in metrics ->
+any surviving HIGH/CRITICAL -> mark verification/judgment in metrics -> classify
+sensitive surfaces + rate effort/risk (risk per the repo's `AGENTS.md`) ->
 `threads` dedup -> post new inline FIX comments and mark publication in metrics
--> post one `summary` comment (must carry
+-> post one `summary` comment (carries the verdict, the effort/risk ratings, and
 `<!-- bot-panel-review-loop: head=<sha> -->`) -> `settle` the reaction.
 
 ## Effectiveness metrics

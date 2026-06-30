@@ -14,7 +14,7 @@
 #   ===ACTIONABLE_JSON===
 #   [ {"number","title","head","engagement","ci","note"}, ... ]
 #   ===REPORT_TABLE===
-#   | PR | Title | Engagement | Result | Panel | Human |
+#   | PR | Title | Engagement | Result | Effort/Risk | Panel | Human |
 #   | ... one row per open PR (unlabeled drafts dropped); actionable rows carry PENDING_VERDICT ... |
 #
 # Drafts are ignored entirely (no row) unless they carry a "ready for review"
@@ -60,7 +60,9 @@ last_marker() {
 }
 
 emit_row() { # number title engagement result
-  printf '| #%s | %s | %s | %s | - | - |\n' "$1" "$2" "$3" "$4" >> "$report_file"
+  # Trailing placeholders: Effort/Risk, Panel, Human. The driver fills them for
+  # PENDING_VERDICT rows; skip/defer rows keep the dashes.
+  printf '| #%s | %s | %s | %s | - | - | - |\n' "$1" "$2" "$3" "$4" >> "$report_file"
 }
 
 push_actionable() { # number title head engagement ci note
@@ -152,6 +154,6 @@ done < <(printf '%s' "$prs" | jq -r \
 echo "===ACTIONABLE_JSON==="
 if [ -s "$actionable_file" ]; then jq -s '.' "$actionable_file"; else echo "[]"; fi
 echo "===REPORT_TABLE==="
-echo "| PR | Title | Engagement | Result | Panel | Human |"
-echo "| --- | --- | --- | --- | --- | --- |"
+echo "| PR | Title | Engagement | Result | Effort/Risk | Panel | Human |"
+echo "| --- | --- | --- | --- | --- | --- | --- |"
 cat "$report_file"
