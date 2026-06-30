@@ -7,6 +7,7 @@ description:
   review", "do my changes follow our conventions", or to gate a diff on code
   cleanliness and readability before merge. Surfaces a worked checklist; does
   not auto-fix unless asked.
+model: claude-sonnet-5
 disable-model-invocation: true
 allowed-tools: Bash, Read, Grep, Glob, Edit, Agent
 argument-hint: "[pr-url|owner/repo#number] [--full] [--fix]"

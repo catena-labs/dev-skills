@@ -13,6 +13,7 @@ description: |
   interactive manual test plan, especially when they want you to watch the dev
   server logs and the local database while they run each step. Generic across
   projects (monorepo or single app, any DB tooling, any framework).
+model: claude-sonnet-5
 ---
 
 # walkmethrough — interactive manual-QA for the current branch
