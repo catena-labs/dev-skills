@@ -204,21 +204,33 @@ whole point: `HAS_COMMENTS` fires on
 
 ## Tick output: mark quiet ticks `[QUIET]`
 
-End every tick with a one-line status. When the tick needed **no human
-attention**, make that status line _start_ with the literal marker `[QUIET]`:
+A `/loop` notifier silences a tick by matching the marker, but it reads **only
+the very start of your final message** — so the marker has to be the first thing
+there, with nothing after it. Get either wrong and the tick pings loudly even
+though you wrote `[QUIET]`.
 
-- **`[QUIET]`** — `anythingToDo` was false, or you only did self-contained
+When a tick needs **no human attention**:
+
+- **Lead the final message with the marker.** `[QUIET]` must be at column 0 of
+  the last thing you say — not after a preamble sentence, not mid-paragraph, not
+  wrapped so another word comes first. Put the one-line status on that same
+  line: `[QUIET] #42 green, 1 known gate unchanged — sleeping 1800s`.
+- **Write nothing after it.** No trailing summary, no sign-off. When driven by
+  `/loop`, the marker line is the **last prose before the `ScheduleWakeup`
+  call**, and you add **no** text after that tool returns — fold the pacing note
+  into the marker line itself rather than restating it afterward. A summary
+  written after the marker becomes the body the notifier sees, and it has no
+  marker, so the mute is lost.
+- A tick is quiet when `anythingToDo` was false, or you only did self-contained
   auto-fixes that need no review (mechanical CI fix pushed, no-action gate
-  acked, behind-but-green left alone). e.g.
-  `[QUIET] #42 green, 1 known gate unchanged — sleeping 1800s`.
-- **No marker (stays loud)** — you stopped to ask the user (any
-  `AskUserQuestion`), drafted a reply awaiting approval, pushed a change you
-  want eyes on, or hit a stop-and-ask trigger. Just report normally.
+  acked, behind-but-green left alone).
 
-A `/loop` notifier can match the leading marker to silence quiet ticks while
-letting the loud ones through. It is plain text, so it is harmless when no
-notifier reads it — never skip real reporting to earn the marker, and never mark
-a tick `[QUIET]` when you asked the user something.
+Stay **loud** (no marker, report normally) when you stopped to ask the user (any
+`AskUserQuestion`), drafted a reply awaiting approval, pushed a change you want
+eyes on, or hit a stop-and-ask trigger. Default is loud: a tick that forgets the
+marker pings you rather than going silently missing, so never skip real
+reporting to earn the marker, and never mark a tick `[QUIET]` when you asked the
+user something. The marker is plain text, harmless when no notifier reads it.
 
 ## Stop-and-ask triggers
 
@@ -229,15 +241,16 @@ a tick `[QUIET]` when you asked the user something.
 
 ## Common mistakes
 
-| Mistake                                     | Reality                                                                                                                        |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Adding a temp worktree to do the work       | You are already on the PR's branch; fix in place                                                                               |
-| Rebase + force-with-lease on an approved PR | Ready PRs get merge commits or appended fixes                                                                                  |
-| Updating a behind-but-green branch          | No-conflict, green, no up-to-date gate = leave it                                                                              |
-| Nesting another PR-watching loop            | Two schedulers fight over the session wakeup; this skill is the loop body                                                      |
-| Replying to a human reviewer autonomously   | Draft + user approval first                                                                                                    |
-| Re-fetching PR/CI/thread state by hand      | The scanner already gathered it; read the digest                                                                               |
-| Re-triaging the same gate every tick        | Ack no-action threads with `mark-seen.sh`; `newThreads` drives `HAS_COMMENTS`                                                  |
-| Acking a fixed inline thread in the ledger  | Push, reply, then `resolveReviewThread` — that retires it; the ledger is only for no-action gates and replied-to root comments |
-| Replying to a fix but not retiring it       | Inline: reply **and** resolve. Root: reply **and** ack (no thread to resolve)                                                  |
-| Pulling a full CI log to read one error     | `failingLogs[].excerpt` is the error signature                                                                                 |
+| Mistake                                                 | Reality                                                                                                                        |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Adding a temp worktree to do the work                   | You are already on the PR's branch; fix in place                                                                               |
+| Rebase + force-with-lease on an approved PR             | Ready PRs get merge commits or appended fixes                                                                                  |
+| Updating a behind-but-green branch                      | No-conflict, green, no up-to-date gate = leave it                                                                              |
+| Nesting another PR-watching loop                        | Two schedulers fight over the session wakeup; this skill is the loop body                                                      |
+| Replying to a human reviewer autonomously               | Draft + user approval first                                                                                                    |
+| Re-fetching PR/CI/thread state by hand                  | The scanner already gathered it; read the digest                                                                               |
+| Re-triaging the same gate every tick                    | Ack no-action threads with `mark-seen.sh`; `newThreads` drives `HAS_COMMENTS`                                                  |
+| Acking a fixed inline thread in the ledger              | Push, reply, then `resolveReviewThread` — that retires it; the ledger is only for no-action gates and replied-to root comments |
+| Replying to a fix but not retiring it                   | Inline: reply **and** resolve. Root: reply **and** ack (no thread to resolve)                                                  |
+| Pulling a full CI log to read one error                 | `failingLogs[].excerpt` is the error signature                                                                                 |
+| `[QUIET]` buried mid-message or with a trailing summary | The notifier reads only the start of the final message: marker at column 0, nothing after it (not even after `ScheduleWakeup`) |
