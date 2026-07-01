@@ -86,9 +86,17 @@ These are the canonical gate definitions; later steps reference them by number.
    Re-confirmed live just before dispatch (Step 4a), since enumeration only
    proves a PR was open _then_.
 2. **Passes the flag filters** above (own / dependabot).
-3. **Engagement is NEW or UPDATED** (classified by the Step 1 prefilter). `SEEN`
-   (already reviewed at this exact head, nothing new) is skipped — re-posting
-   identical findings every tick is this skill's cardinal sin.
+3. **Engagement is NEW, UPDATED, or REVISIT** (classified by the Step 1
+   prefilter). `SEEN` (already reviewed at this exact head, nothing new) is
+   skipped — re-posting identical findings every tick is this skill's cardinal
+   sin. The one exception the prefilter carves out of `SEEN` is `REVISIT`: a PR
+   whose last verdict was do-not-approve and whose inline comments the author
+   has since **resolved or replied to** without pushing a new commit. That is
+   not "nothing new" — the author engaged with the feedback — so it is re-judged
+   (per Step 4e: no fresh panel, just decide whether the concerns are now
+   addressed). A per-state fingerprint in the summary marker keeps a REVISIT
+   from firing more than once for the same engagement state, so this does not
+   reopen the cardinal sin.
 4. **No merge conflicts.** `mergeable == CONFLICTING` → skip, report "skipped
    (merge conflict)": a PR that can't merge cleanly will be rebased, changing
    the diff a panel would review. `mergeable == UNKNOWN` (GitHub hasn't computed
@@ -115,13 +123,20 @@ Pass through whatever flags the invocation received. The script prints two
 sentinel-delimited sections:
 
 - `===ACTIONABLE_JSON===` — a JSON array of the PRs that survived every gate,
-  each `{number, title, head, engagement, ci, note}`. `engagement` is `NEW` or
-  `UPDATED` (UPDATED = there are new commits since the last review); `note`
-  flags a PR with no CI checks. **This is the dispatch list for Step 4** — one
-  agent per entry. (Review depth no longer varies by PR size — every review runs
-  the same three-panelist panel — claude + codex (standard) plus a second claude
-  running `decompose` — which self-scales, so the prefilter carries no size/tier
-  fields.)
+  each `{number, title, head, engagement, ci, note, revisit}`. `engagement` is
+  `NEW`, `UPDATED`, or `REVISIT`: `UPDATED` = there are new commits since the
+  last review (re-review the whole PR, exactly like `NEW`); `REVISIT` = no new
+  commits, but the last verdict was do-not-approve and the author has since
+  resolved or replied to every bot comment, so the concerns are re-judged
+  **without a fresh panel** (Step 4e). `revisit` is the engagement fingerprint
+  (non-null only for a `REVISIT` entry) — the reviewer must echo it into the
+  summary marker as `revisit=<fp>` so the same state is not revisited twice.
+  `note` flags a PR with no CI checks (or, for a REVISIT, that the author
+  addressed the comments). **This is the dispatch list for Step 4** — one agent
+  per entry. (Review depth for a NEW/UPDATED review no longer varies by PR size
+  — every such review runs the same three-panelist panel — claude + codex
+  (standard) plus a second claude running `decompose` — which self-scales, so
+  the prefilter carries no size/tier fields.)
 - `===REPORT_TABLE===` — a prebuilt markdown table, one row per open PR
   (unlabeled drafts are dropped entirely, so they never appear). Every
   skipped/deferred row already carries its reason; each actionable row carries
@@ -138,10 +153,14 @@ is clearly wrong. Every no-judgment gate now lives inside it.
 ## Step 4: Dispatch one fresh agent per actionable PR
 
 One fresh isolated context per PR, done as subagents: the sweep stays cheap and
-each PR gets clean, uncontaminated context. Each agent owns exactly one PR, does
-Steps 4a-4d, and returns a one-line verdict. Inherit the session model — don't
-pin one; the judgment (which findings are real, the verdict) wants the strong
-model. The subagent doesn't load this skill, so **pass it the absolute paths to
+each PR gets clean, uncontaminated context. Each agent owns exactly one PR and
+returns a one-line verdict. A `NEW` or `UPDATED` entry runs the full review,
+Steps 4a-4d (panel, findings, comments, summary). A `REVISIT` entry runs the
+lighter re-judgment path, **Step 4e** instead of 4a-4c (no fresh panel — the
+diff is unchanged; it just decides whether the prior do-not-approve concerns are
+now addressed) and then 4d. Inherit the session model — don't pin one; the
+judgment (which findings are real, the verdict) wants the strong model. The
+subagent doesn't load this skill, so **pass it the absolute paths to
 `pr-actions.sh` and `metrics.sh`** (the same `<skill-dir>` from Step 1) along
 with the brief.
 
@@ -178,10 +197,12 @@ lines, and any per-finding sanity check pulls only that one path.
 Give each agent the brief below, filling `{owner}/{repo}` and the entry's
 `number` and `head` from `ACTIONABLE_JSON`. NEW and UPDATED entries get the same
 review — the whole PR (the engagement label only distinguishes them in the
-report). If the entry carries a `note` (e.g. no CI checks), pass it along so the
-agent can mention it.
+report); a REVISIT entry gets the Step 4e brief instead, and you must also pass
+it the entry's `revisit` fingerprint (it goes into the marker). If the entry
+carries a `note` (e.g. no CI checks, or "author addressed comments"), pass it
+along so the agent can mention it.
 
-### 4a. Re-confirm actionable, react 👀, gather findings, classify surfaces
+### 4a. Re-confirm actionable, react 👀, gather findings, classify surfaces, rate effort/risk
 
 Enumeration is a snapshot; minutes can pass before this agent runs, and a PR can
 merge, close, convert to draft, or get a fresh push in that gap. **Re-resolve
@@ -342,6 +363,48 @@ human-review note can point a reader at it. These surfaces populate the
 collapsed human-review section in the summary (4c) and the human-review flag
 returned to the sweep — they are not posted as inline comments.
 
+**Rate the PR's level of effort and risk.** Independently of the findings and of
+the verdict, assign two ratings the summary will carry (4c). They reuse the
+sensitive surfaces you just classified, so do them in the same pass:
+
+- **Effort: Low / Medium / High** — how much work the change represents. Size it
+  from the PR's own counts (changed files, added/deleted lines), how many
+  distinct areas/packages it spans, and conceptual weight (a localized tweak vs.
+  new abstractions, a migration, or a cross-cutting refactor). Pull the counts
+  cheaply rather than via a full-diff fetch:
+
+  ```bash
+  gh pr view {number} -R {owner}/{repo} --json additions,deletions,changedFiles
+  ```
+
+  Low = small and localized (a handful of files, no new concepts); Medium =
+  moderate, multi-file or one new unit of behavior; High = large, sprawling, or
+  conceptually heavy (many areas, new subsystems, a migration plus dependent
+  logic).
+
+- **Risk: Low / Medium / High / Critical** — how dangerous the change is if it
+  is wrong. **The target repo's `AGENTS.md` is the definition of risk: consult
+  it.** `Read` the repo-root `AGENTS.md` (plus any nested `AGENTS.md` for a
+  touched package) and let its CRITICAL items and sensitive surfaces drive the
+  rating — money math (`@bank/money`), auth / RBAC / permissions, schema /
+  migrations, secrets, and outbound provider movement (`services/transfers.ts`).
+  Rate off which of those surfaces the PR touches and how, not off diff size:
+  - **Low** — no sensitive surface (docs, tests, isolated UI/copy, a
+    self-contained refactor).
+  - **Medium** — touches a sensitive surface peripherally (additive,
+    non-destructive, or behind an existing gate).
+  - **High** — materially changes auth/RBAC, schema/migration, secrets, or
+    money-adjacent logic.
+  - **Critical** — directly alters money-movement math, an auth/ownership gate,
+    or an outbound provider path, or ships destructive/irreversible DDL.
+
+  When AGENTS.md's guidance and these tiers disagree, AGENTS.md wins — it is the
+  repo's own definition of risk.
+
+The two ratings are **independent of the verdict** (a one-line change to money
+math is Low effort but Critical risk) and render in the summary's visible body
+(4c). They are not inline comments and do not gate the verdict.
+
 ### 4b. Resolve the correct file + line for each finding
 
 An inline comment only lands on the right code when its anchor matches the PR
@@ -437,9 +500,9 @@ the repo's user-facing-prose convention.
 
 **Post it fresh — a new summary comment on every review.** Write the raw
 markdown body (template below) to a file and hand it to `summary`; it always
-POSTs a new comment. So each review (NEW, or an UPDATED re-review) leaves its
-own summary on the PR — a running history of verdicts rather than a single
-overwritten one:
+POSTs a new comment. So each review (NEW, an UPDATED re-review, or a REVISIT
+re-judgment) leaves its own summary on the PR — a running history of verdicts
+rather than a single overwritten one:
 
 ```bash
 bash <skill-dir>/pr-actions.sh summary {number} /tmp/bot-panel-review-loop-{number}-summary.md
@@ -453,21 +516,27 @@ the sweep:
 bash <skill-dir>/metrics.sh run-finish "$run_id" approve 2 1 "auth,money" "claude (opus-4.8) standard + codex (gpt-5) standard + claude/decompose (opus-4.8)"
 ```
 
-Summary body — keep the **visible** body to just the three things a reader
-actually scans: the verdict, the panel (which panelists ran), and the head.
-Every findings list and the human-review note live in collapsed `<details>`
-accordions, so a reader expands only what they want. Always posted, even with
-zero inline findings. **Omit any findings accordion whose count is zero**; omit
-the human-review accordion only when no sensitive surface is touched. The blank
-line after each `<summary>` is required for GitHub to render the markdown
-inside. The `<!-- ... head= -->` marker is mandatory and must carry the current
-head — the Step 1 prefilter's engagement check reads the most recent marker, so
-it keeps working across the stacked summaries.
+Summary body — keep the **visible** body to just the four things a reader
+actually scans: the verdict, the effort/risk ratings, the panel (which panelists
+ran), and the head. Every findings list and the human-review note live in
+collapsed `<details>` accordions, so a reader expands only what they want.
+Always posted, even with zero inline findings. **Omit any findings accordion
+whose count is zero**; omit the human-review accordion only when no sensitive
+surface is touched. The blank line after each `<summary>` is required for GitHub
+to render the markdown inside. The `<!-- ... head= -->` marker is mandatory and
+must carry the current head — the Step 1 prefilter's engagement check reads the
+most recent marker, so it keeps working across the stacked summaries. **On a
+REVISIT re-judgment (Step 4e), append ` revisit={fp}`** to that marker, echoing
+the fingerprint from the entry's `revisit` field verbatim — it is how the
+prefilter knows this exact engagement state was already re-judged and does not
+REVISIT it again. NEW/UPDATED summaries carry `head=` only (no `revisit=`).
 
 ```
 ## Panel review (advisory)
 
 **Verdict: <Approve | Do not approve yet>.** <one-line reason>
+
+**Effort: <Low | Medium | High>. Risk: <Low | Medium | High | Critical>.** <one-line basis for each, e.g. "moderate multi-file change; touches RBAC permission gates">
 
 **Panel:** {name (model) per panelist, noting its approach — e.g. "claude (opus-4.8) + codex (gpt-5) standard, claude/decompose (opus-4.8)"}, at {short head}; gather-only, no code was changed. <only-if-thin: note that fewer panelists ran than expected, e.g. "only one CLI panelist was detected on PATH, so consensus is single-panelist.">
 
@@ -502,11 +571,16 @@ it keeps working across the stacked summaries.
 <!-- bot-panel-review-loop: head={headRefOid} -->
 ```
 
-The **Panel** line is mandatory: list every panelist that ran — each as
-`name (model)` and note its review approach (standard or `decompose`) — so the
-summary is self-describing about the panel's breadth and flags a thin single-CLI
-run. Everything else is collapsed by design — do not promote a findings list or
-the human-review note into the visible body.
+(REVISIT summaries end the marker with `head={headRefOid} revisit={fp}` instead;
+see Step 4e.)
+
+The **Effort/Risk** line is mandatory too: both ratings on every summary,
+assigned per 4a (effort from diff scope, risk from the repo's `AGENTS.md`
+sensitive surfaces). The **Panel** line is mandatory: list every panelist that
+ran — each as `name (model)` and note its review approach (standard or
+`decompose`) — so the summary is self-describing about the panel's breadth and
+flags a thin single-CLI run. Everything else is collapsed by design — do not
+promote a findings list or the human-review note into the visible body.
 
 **Verdict rule:** **Do not approve yet** if any FIX finding is CRITICAL/HIGH or
 a substantiated wrong-approach flag survives; **Approve** if only MEDIUM/LOW
@@ -550,7 +624,8 @@ bash <skill-dir>/pr-actions.sh settle {number} approve     # or: settle {number}
 
 So the reaction alone tells a watcher the outcome: 🚀 = approved, 👀 = comments
 worth addressing. Reactions dedupe per actor+content, so the swap is idempotent
-on an UPDATED re-review.
+on an UPDATED or REVISIT re-review. A REVISIT that finds the concerns addressed
+settles `approve` (👀 → 🚀); one that finds them still open settles `comments`.
 
 **Stale 🚀 on a re-review that downgrades.** A PR can be approved (🚀), then the
 author pushes again and it re-surfaces as UPDATED at a new head still carrying
@@ -561,31 +636,134 @@ and leaves the 👀 — so the reaction never advertises a withdrawn approval (n
 manual `gh api -X DELETE` needed).
 
 Return to the sweep:
-`#{number} {NEW|UPDATED}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [human-review: {surfaces or none}] [metrics: run {run_id}]`.
-The trailing tags let the sweep show panel breadth and the human-review flag
-without re-reading each PR.
+`#{number} {NEW|UPDATED|REVISIT}: {approve|do-not-approve} (N posted) [panel: name(model)+... noting standard/decompose] [effort/risk: {Low|Medium|High}/{Low|Medium|High|Critical}] [human-review: {surfaces or none}] [metrics: run {run_id}]`.
+The trailing tags let the sweep show panel breadth, the effort/risk rating, and
+the human-review flag without re-reading each PR. A REVISIT reports its panel
+tag as the re-judgment (e.g. `panel: re-judged {short head} (no new panel)`)
+and, since it starts no new run, reports
+`[metrics: owner-outcomes on run {run_id}]` (the original run it re-judged)
+instead of a fresh run.
+
+### 4e. REVISIT: re-judge a do-not-approve whose comments the author addressed
+
+A `REVISIT` entry is a PR the bot last told the author to fix and whose inline
+comments the author has since **resolved or replied to without pushing a new
+commit** (the Step 1 prefilter established that; its `revisit` field carries the
+engagement fingerprint). The diff is unchanged, so a fresh panel would only
+reproduce the same findings — **do not run `panel-review`**. Instead decide one
+thing: are the bot's prior concerns now addressed? Steps:
+
+1. **Confirm live state** exactly as in 4a:
+   `pr-actions.sh confirm {number} {head}`. `ok` → proceed; `skip …` → report
+   and stop; `defer …` (the author pushed after all) → defer, the next tick
+   re-classifies it as UPDATED and runs a real panel. React 👀
+   (`pr-actions.sh react {number}`) once it is `ok`. **Do not call
+   `metrics.sh run-start`** — a REVISIT runs no panel and produces no new
+   panelist findings, and `run_start` is keyed `UNIQUE(repo, pr, head)`, so at
+   this already-reviewed head it would reuse and clobber the original panel
+   run's row. The REVISIT's metrics contribution is the **owner outcome** on the
+   prior findings (step 5), not a new run. Recover the original run and its
+   findings so you know what you are re-judging:
+
+   ```bash
+   run_id="$(bash <skill-dir>/metrics.sh runs {number} | awk -v h={head} '$3==h{print $1; exit}')"
+   [ -n "$run_id" ] && bash <skill-dir>/metrics.sh run-findings "$run_id"   # prior findings + verdicts/publication
+   ```
+
+   The metrics DB is machine-local, so `run_id` can be empty (the original
+   review ran on another box or predates metrics). That is fine: fall back to
+   the GitHub summary and threads for what to re-judge, and skip the
+   owner-outcome recording in step 5 (there are no local finding rows to
+   update).
+
+2. **Gather the prior concerns and the author's response.** Read the most recent
+   bot summary (its findings lists and verdict) and every inline thread the bot
+   opened, with its resolution state and any replies:
+
+   ```bash
+   bash <skill-dir>/pr-actions.sh threads {number}   # resolved|open <TAB> path <TAB> body
+   ```
+
+   For the author's reasoning behind a resolve/reply, read the thread's comments
+   (`gh api repos/{owner}/{repo}/pulls/{number}/comments`) and any issue-comment
+   reply to the summary
+   (`gh api repos/{owner}/{repo}/issues/{number}/comments`).
+
+3. **Judge each prior blocking concern (the CRITICAL/HIGH FIX findings that
+   drove the do-not-approve), addressed vs still-open**, against the live code
+   at the cited `file:line` (unchanged, but confirm) and the author's argument:
+   - **Addressed** — the author fixed it in an earlier commit already in this
+     head, or gave a substantiated reason it is a non-issue (intentional,
+     handled elsewhere, a false positive). A convincing reply counts even with
+     no code change; a bare "resolved" with no rationale on a real CRITICAL/HIGH
+     does not.
+   - **Still-open** — the concern stands and the reply/resolution does not
+     actually answer it.
+
+   This is the "whether it's worth a re-review" judgment: if the responses are
+   substantive, re-judge; if they are non-substantive hand-waving on a real
+   blocker, the do-not-approve stands. Apply the same 4a adversarial refute rule
+   before letting any HIGH/CRITICAL keep blocking.
+
+4. **Do NOT re-post the prior inline findings** — they are already on the PR (4c
+   idempotency still holds). Post at most a short reply where a specific
+   correction is warranted; the primary output is a fresh summary.
+
+5. **Post a fresh summary** with the updated verdict (4c template and
+   em-dash-free prose), framed as a re-evaluation:
+   - Verdict: **Approve** if every prior blocker is now addressed; **Do not
+     approve yet** if any still stands (list what remains in the accordions).
+   - Effort/Risk: carry forward the prior review's ratings (the diff is
+     unchanged).
+   - **Panel** line: state that this is a re-judgment, not a new panel — e.g.
+     `re-judgment of the {short head} panel review (no new panel; diff unchanged), evaluating the author's responses`.
+   - **Marker: `head={headRefOid} revisit={fp}`**, echoing the entry's `revisit`
+     fingerprint verbatim, so the prefilter does not REVISIT this same state
+     again. Then post it with `pr-actions.sh summary {number} …`. There is **no
+     `run-finish`** (no run was started).
+
+   Instead, record the owner outcome on each prior finding you re-judged (the
+   `finding_id`s came from `run-findings` in step 1), which is the REVISIT's
+   real metrics contribution:
+
+   ```bash
+   # addressed by a substantiated reply / earlier fix:
+   bash <skill-dir>/metrics.sh owner {finding_id} fixed "author reply/commit addresses it (revisit at {short head})"
+   # explicitly accepted with a non-code disposition:
+   bash <skill-dir>/metrics.sh owner {finding_id} acknowledged "author accepted; resolved the thread"
+   ```
+
+   Leave any concern that stayed a blocker `unknown` for the Step 6 sweep.
+
+6. **Settle the reaction** per 4d: `settle {number} approve` on an upgrade to
+   approve (clears 👀, adds 🚀), or `settle {number} comments` if it stays
+   do-not-approve.
 
 ## Step 5: Report (in-session)
 
 The prefilter already emitted `REPORT_TABLE` — one row per open PR (unlabeled
 drafts excluded) with every skip/defer reason filled in. Take it verbatim and,
-for each `PENDING_VERDICT` row, replace the last three columns with what that
-PR's agent returned: the **Result** (verdict + finding counts), the **Panel**
-(which panelists ran), and the **Human** column (human-review surfaces, or
-blank). Skip and defer rows are already final.
+for each `PENDING_VERDICT` row, replace the last four columns with what that
+PR's agent returned: the **Result** (verdict + finding counts), the
+**Effort/Risk** rating (e.g. "Medium / High"), the **Panel** (which panelists
+ran), and the **Human** column (human-review surfaces, or blank). Skip and defer
+rows are already final.
 
-| PR   | Title           | Engagement | Result                          | Panel                               | Human |
-| ---- | --------------- | ---------- | ------------------------------- | ----------------------------------- | ----- |
-| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | claude+codex+claude/decompose       | auth  |
-| #905 | fee preview     | UPDATED    | approve (clean)                 | claude+claude/decompose (codex n/a) | money |
-| #906 | bump deps       | -          | dependabot → skipped            | -                                   | -     |
-| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -                                   | -     |
-| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -                                   | -     |
+| PR   | Title           | Engagement | Result                          | Effort/Risk   | Panel                               | Human |
+| ---- | --------------- | ---------- | ------------------------------- | ------------- | ----------------------------------- | ----- |
+| #903 | evidence lookup | NEW        | do-not-approve (2 HIGH, 1 MED)  | Medium / High | claude+codex+claude/decompose       | auth  |
+| #905 | fee preview     | UPDATED    | approve (clean)                 | Low / Medium  | claude+claude/decompose (codex n/a) | money |
+| #906 | bump deps       | -          | dependabot → skipped            | -             | -                                   | -     |
+| #907 | reconcile tweak | NEW        | deferred (CI pending)           | -             | -                                   | -     |
+| #908 | webhook verify  | REVISIT    | approve (concerns addressed)    | Medium / High | re-judged 1a2b3c (no new panel)     | -     |
+| #910 | my refactor     | SEEN       | skipped (reviewed at this head) | -             | -                                   | -     |
 
-Keep it to signal — detailed findings live on each PR. The Panel column says at
-a glance whether a review was a full multi-model panel or a thinner single-CLI
-run; the Human column surfaces which approved PRs still want a human sign-off,
-so a clean 🚀 on sensitive code is not mistaken for "no one needs to look."
+Keep it to signal — detailed findings live on each PR. The Effort/Risk column
+shows each PR's size and danger at a glance; the Panel column says whether a
+review was a full multi-model panel, a thinner single-CLI run, or a REVISIT
+re-judgment of an earlier panel (no new panel ran); the Human column surfaces
+which approved PRs still want a human sign-off, so a clean 🚀 on sensitive code
+is not mistaken for "no one needs to look."
 
 For an effectiveness snapshot, run the SQLite rollup after the sweep. Do not
 paste it into every PR; it is operator telemetry:

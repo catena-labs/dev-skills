@@ -10,9 +10,9 @@ a single sweep see `SKILL.md` in this directory.
 it selects the actionable ones and dispatches **one fresh review sub-agent per
 PR**. Each sub-agent runs a multi-model `panel-review` (three panelists:
 claude + codex standard, plus a second claude on `decompose`), posts advisory
-inline comments plus one summary comment, and settles a GitHub reaction. The
-loop **never changes code** — its only side effects are GitHub comments and
-reactions.
+inline comments plus one summary comment (carrying an effort/risk rating
+alongside the verdict), and settles a GitHub reaction. The loop **never changes
+code** — its only side effects are GitHub comments and reactions.
 
 It is driven by a **local cron** (the primary entrypoint) or, interactively, by
 `/loop`:
@@ -43,7 +43,7 @@ and eventual PR-owner outcomes, scoped by repo and PR head.
    head. `reserve <pr> <head>` before dispatch → `ok` dispatch, `full` stop this
    tick, `held` skip. The lease table is the in-flight truth (no `{PR -> agent}`
    map to carry), so `held` also covers a PR `select-prs.sh` still shows
-   NEW/UPDATED while it's mid-review. Never kill an in-flight review.
+   NEW/UPDATED/REVISIT while it's mid-review. Never kill an in-flight review.
 3. **Release on return; reconcile each tick.** `release <pr>` on any sub-agent
    return or a failed dispatch; the TTL (30 min) is only a crash backstop. At
    each sweep start, reconcile a compacted driver: `release` any lease whose PR
@@ -108,10 +108,24 @@ none of that:
 `/panel-review --pr <n> --panelist claude --panelist codex --panelist claude/decompose`
 (gather-only, run synchronously) -> record panelist heartbeats in metrics ->
 judge findings + record sources in metrics -> mandatory adversarial refute on
-any surviving HIGH/CRITICAL -> mark verification/judgment in metrics ->
+any surviving HIGH/CRITICAL -> mark verification/judgment in metrics -> classify
+sensitive surfaces + rate effort/risk (risk per the repo's `AGENTS.md`) ->
 `threads` dedup -> post new inline FIX comments and mark publication in metrics
--> post one `summary` comment (must carry
+-> post one `summary` comment (carries the verdict, the effort/risk ratings, and
 `<!-- bot-panel-review-loop: head=<sha> -->`) -> `settle` the reaction.
+
+**A REVISIT entry follows the lighter path (SKILL.md Step 4e), not a panel.**
+`confirm` -> `react` -> recover the prior run/findings (`metrics.sh runs` +
+`run-findings`; **no `run-start`** — it would clobber the original run at this
+same head) -> read the prior summary + `threads` and the author's
+replies/resolutions -> judge each prior do-not-approve concern addressed vs
+still-open (adversarial refute still applies) -> **no new panel, no re-posting
+of prior inline findings** -> post a fresh `summary` whose marker is
+`head=<sha> revisit=<fp>` (the fingerprint from the select-prs entry, echoed
+verbatim) -> record `metrics.sh owner` outcomes on the prior findings the author
+addressed -> `settle` (approve on an upgrade, comments if it stays
+do-not-approve). It re-uses the prior effort/risk ratings since the diff is
+unchanged.
 
 ## Effectiveness metrics
 
@@ -146,9 +160,21 @@ not post this telemetry to PRs.
 ## Selection gates (handled by `select-prs.sh`)
 
 Open and not an unlabeled draft; passes own/dependabot flag filters; engagement
-is NEW or UPDATED (SEEN = already reviewed at this head -> skip); no merge
-conflict (CONFLICTING -> skip, UNKNOWN -> defer); CI green (pending -> defer,
-red -> skip).
+is NEW, UPDATED, or REVISIT (SEEN = already reviewed at this head -> skip); no
+merge conflict (CONFLICTING -> skip, UNKNOWN -> defer); CI green (pending ->
+defer, red -> skip).
+
+**REVISIT** is the one carve-out from SEEN: a PR at an already-reviewed head
+whose last verdict was do-not-approve and whose inline comments the author has
+since resolved or replied to **without pushing a new commit**. There is no new
+diff to panel, but the author engaged with the feedback, so the reviewer
+re-judges whether the concerns are now addressed (Step 4e: no fresh panel; read
+the prior findings and the author's responses, then issue a fresh verdict). A
+per-engagement-state fingerprint recorded in the summary marker (`revisit=<fp>`)
+keeps a REVISIT from firing twice for the same state, so it cannot loop; a
+further author response (a new resolve/reply) changes the fingerprint and
+re-triggers it, and an upgrade to approve ends it (verdict no longer
+do-not-approve).
 
 ## Reaction semantics + stale-🚀 on re-reviews
 
