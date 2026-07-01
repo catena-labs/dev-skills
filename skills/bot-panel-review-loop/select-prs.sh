@@ -12,16 +12,22 @@
 # Output (stdout), two sections delimited by sentinel lines:
 #
 #   ===ACTIONABLE_JSON===
-#   [ {"number","title","head","engagement","ci","note"}, ... ]
+#   [ {"number","title","head","engagement","ci","note","revisit"}, ... ]
 #   ===REPORT_TABLE===
 #   | PR | Title | Engagement | Result | Effort/Risk | Panel | Human |
 #   | ... one row per open PR (unlabeled drafts dropped); actionable rows carry PENDING_VERDICT ... |
 #
 # Drafts are ignored entirely (no row) unless they carry a "ready for review"
 # label, which is treated as an explicit author opt-in and runs the same gates
-# as an active PR. Actionable engagement is NEW or UPDATED with CI green; every
-# other PR is a terminal row (skipped/deferred) with its reason filled in. The caller
-# dispatches one review agent per actionable entry, then replaces each
+# as an active PR. Actionable engagement is NEW, UPDATED, or REVISIT with CI green;
+# every other PR is a terminal row (skipped/deferred) with its reason filled in.
+# REVISIT is a PR at an already-reviewed head that the bot last told the author to
+# fix (do-not-approve) and whose inline comments the author has since resolved or
+# replied to without pushing a new commit: no fresh panel is warranted (the diff is
+# unchanged), but it is worth re-judging whether the concerns are now addressed.
+# Its "revisit" field carries the engagement fingerprint the reviewer must echo
+# into the summary marker (revisit=<fp>) so the same state is not revisited twice.
+# The caller dispatches one review agent per actionable entry, then replaces each
 # PENDING_VERDICT row with the returned verdict.
 #
 # Flags mirror the skill: --exclude-own, --dependabot (include dependabot).
@@ -50,13 +56,63 @@ actionable_file=$(mktemp)
 report_file=$(mktemp)
 trap 'rm -f "$actionable_file" "$report_file"' EXIT
 
-# Pull the most recent engagement marker head for a PR ("" if none). Matches both
-# the current "bot-panel-review-loop" marker and the legacy "panel-review-prs"
-# marker, so PRs reviewed before the rename are still recognized (not re-reviewed).
-last_marker() {
+# Full body of the PR's most recent engagement-marker comment ("" if none).
+# Matches both the current "bot-panel-review-loop" marker and the legacy
+# "panel-review-prs" marker, so PRs reviewed before the rename are still
+# recognized (not re-reviewed). The caller parses head= (SEEN/UPDATED), the
+# verdict, and any revisit= fingerprint (REVISIT dedup) out of the returned body.
+last_marker_body() {
   gh api "repos/$repo/issues/$1/comments" --paginate \
-    -q '[.[] | select(.body | test("<!-- (bot-panel-review-loop|panel-review-prs): head=")) | .body] | last' 2>/dev/null \
-    | grep -oE 'head=[0-9a-f]+' | sed 's/head=//' | tail -n1
+    -q '[.[] | select(.body | test("<!-- (bot-panel-review-loop|panel-review-prs): head=")) | .body] | (last // "")' 2>/dev/null
+}
+
+# Decide whether a PR at an already-reviewed head is worth a REVISIT rather than a
+# plain SEEN skip. A revisit is warranted when the last review said do-not-approve,
+# the bot opened at least one inline comment thread, every such thread is now
+# resolved or has a non-bot reply (the author engaged without pushing a new
+# commit), and that engagement state differs from the one the last revisit already
+# evaluated (recorded as the marker's revisit= fingerprint). Prints the current
+# fingerprint and returns 0 when a revisit is warranted; prints nothing and returns
+# non-zero otherwise. Costs one GraphQL call, and only for a do-not-approve PR, so
+# approved/clean PRs pay nothing.
+revisit_fingerprint() { # num marker_body
+  local num="$1" body="$2" lines fp prev_fp
+  # Only a PR the bot last told the author to fix is a candidate.
+  printf '%s' "$body" | grep -qiE 'verdict:.*do not approve' || return 1
+
+  # One canonical "<resolved 0|1>:<non-bot-reply 0|1>" line per bot-opened thread.
+  # env.BOT_LOGIN carries our login into the (gojq) filter; a bot thread is one
+  # whose first comment is ours, and it is "handled" if resolved or if any later
+  # comment is by someone other than us (the author responded).
+  lines=$(BOT_LOGIN="$me" gh api graphql \
+    -f owner="${repo%%/*}" -f repo="${repo##*/}" -F num="$num" -f query='
+      query($owner:String!,$repo:String!,$num:Int!){
+        repository(owner:$owner,name:$repo){ pullRequest(number:$num){
+          reviewThreads(first:100){ nodes{
+            isResolved
+            comments(first:50){ nodes{ author{ login } } }
+          } } } } }' \
+    -q '
+      .data.repository.pullRequest.reviewThreads.nodes[]
+      | select(.comments.nodes[0].author.login == env.BOT_LOGIN)
+      | "\(if .isResolved then 1 else 0 end):\(if ([.comments.nodes[1:][].author.login] - [env.BOT_LOGIN] | length) > 0 then 1 else 0 end)"' \
+    2>/dev/null) || return 1
+
+  # No inline thread the bot opened -> nothing was "resolved or replied to".
+  [ -n "$lines" ] || return 1
+  # Every bot thread must be handled (resolved, or a non-bot reply); a "0:0" line
+  # is a still-open, unanswered bot thread, so bail.
+  printf '%s\n' "$lines" | grep -qE '^0:0$' && return 1
+
+  # Fingerprint the handled-state; stable tick-to-tick unless the author engages
+  # further (resolves or replies to more), which should re-trigger a revisit.
+  fp=$(printf '%s\n' "$lines" | LC_ALL=C sort | cksum | awk '{print $1"-"$2}')
+  prev_fp=$(printf '%s' "$body" | grep -oE 'revisit=[0-9-]+' | sed 's/revisit=//' | tail -n1)
+  # Already revisited this exact engagement state -> nothing new to judge.
+  [ "$prev_fp" = "$fp" ] && return 1
+
+  printf '%s' "$fp"
+  return 0
 }
 
 emit_row() { # number title engagement result
@@ -65,12 +121,13 @@ emit_row() { # number title engagement result
   printf '| #%s | %s | %s | %s | - | - | - |\n' "$1" "$2" "$3" "$4" >> "$report_file"
 }
 
-push_actionable() { # number title head engagement ci note
+push_actionable() { # number title head engagement ci note revisit
   jq -nc \
     --argjson number "$1" --arg title "$2" --arg head "$3" \
-    --arg engagement "$4" --arg ci "$5" --arg note "$6" \
+    --arg engagement "$4" --arg ci "$5" --arg note "$6" --arg revisit "$7" \
     '{number:$number, title:$title, head:$head, engagement:$engagement,
-      ci:$ci, note:(if $note=="" then null else $note end)}' >> "$actionable_file"
+      ci:$ci, note:(if $note=="" then null else $note end),
+      revisit:(if $revisit=="" then null else $revisit end)}' >> "$actionable_file"
 }
 
 # Pass 1: the gates expressible from the list payload alone. Emits one TSV row
@@ -99,22 +156,40 @@ while IFS=$'\t' read -r num head title disp draft; do
 
   # --- candidate: engagement classification ---
   # UPDATED gets the same full-PR re-review as NEW; the marker only tells us
-  # whether there is anything new to look at since the last review at all.
-  prev=$(last_marker "$num")
+  # whether there is anything new to look at since the last review at all. A PR at
+  # a head already reviewed is normally SEEN (skip), but if the last verdict was
+  # do-not-approve and the author has since resolved/replied to every bot comment
+  # (without pushing), it becomes REVISIT: re-judge whether the concerns are now
+  # addressed. revisit_fingerprint decides that and, when it does, returns the
+  # engagement fingerprint that dedupes it (see the function).
+  marker=$(last_marker_body "$num")
+  prev=$(printf '%s' "$marker" | grep -oE 'head=[0-9a-f]+' | sed 's/head=//' | tail -n1)
   note=""
+  revisit_fp=""
   if [ -z "$prev" ]; then
     engagement="NEW"
   elif [ "$prev" = "$head" ]; then
-    emit_row "$num" "$title" "SEEN" "skipped (reviewed at this head)"; continue
+    if revisit_fp=$(revisit_fingerprint "$num" "$marker"); then
+      engagement="REVISIT"; note="${note:+$note; }author resolved/replied to all comments; re-evaluating"
+    else
+      revisit_fp=""
+      emit_row "$num" "$title" "SEEN" "skipped (reviewed at this head)"; continue
+    fi
   else
     # Head moved since the last review. "identical" means the tree did not change
     # (e.g. a base merge) so there is nothing new to review; anything else (ahead,
     # diverged/rebased, or compare unavailable) is UPDATED and re-reviewed in full.
     status=$(gh api "repos/$repo/compare/$prev...$head" -q .status 2>/dev/null)
     if [ "$status" = "identical" ]; then
-      emit_row "$num" "$title" "SEEN" "skipped (no new commits)"; continue
+      if revisit_fp=$(revisit_fingerprint "$num" "$marker"); then
+        engagement="REVISIT"; note="${note:+$note; }author resolved/replied to all comments; re-evaluating"
+      else
+        revisit_fp=""
+        emit_row "$num" "$title" "SEEN" "skipped (no new commits)"; continue
+      fi
+    else
+      engagement="UPDATED"
     fi
-    engagement="UPDATED"
   fi
 
   # --- CI gate (gate 5) ---
@@ -130,7 +205,7 @@ while IFS=$'\t' read -r num head title disp draft; do
   fi
 
   [ "$draft" = "draft" ] && note="${note:+$note; }ready-for-review draft"
-  push_actionable "$num" "$title" "$head" "$engagement" "$ci" "$note"
+  push_actionable "$num" "$title" "$head" "$engagement" "$ci" "$note" "$revisit_fp"
   emit_row "$num" "$title" "$engagement" "PENDING_VERDICT"
 done < <(printf '%s' "$prs" | jq -r \
   --arg me "$me" \

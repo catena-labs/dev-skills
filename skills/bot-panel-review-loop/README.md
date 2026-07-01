@@ -70,7 +70,10 @@ for the reservation and metrics databases.
   JSON never enters the model's context. A PR is reviewed only if it is open,
   not a draft (unless labeled `ready for review`), passes the flag filters, is
   NEW or UPDATED since the last review, has no merge conflicts, and has green
-  CI.
+  CI. A fifth case, REVISIT, re-opens a PR that was left do-not-approve once its
+  author has resolved or replied to every bot comment without pushing — the bot
+  re-judges whether the concerns are addressed (no fresh panel, since the diff
+  is unchanged).
 - **Dispatches one fresh agent per PR.** Each agent reacts 👀, runs a
   gather-only panel review of that PR's diff (claude + codex holistic, plus a
   third claude running `decompose` for a scoped-chunk-plus-seam-pass deep read),
@@ -89,10 +92,13 @@ for the reservation and metrics databases.
   approve verdict (leaving 👀 when it left comments). On a re-review that
   downgrades a prior approve, it also clears the now-stale 🚀 so the reaction
   never advertises a withdrawn approval.
-- **Tracks engagement (NEW / UPDATED / SEEN)** via a marker comment, so it
-  re-reviews the whole PR only when it has new commits and never re-posts an
-  inline finding already on the PR. Each review still leaves a fresh summary
-  comment, so the PR keeps a running history of verdicts.
+- **Tracks engagement (NEW / UPDATED / REVISIT / SEEN)** via a marker comment,
+  so it re-reviews the whole PR only when it has new commits and never re-posts
+  an inline finding already on the PR. A do-not-approve PR whose comments the
+  author has since resolved or replied to (without pushing) is re-judged once as
+  a REVISIT — evaluating whether the concerns were addressed — deduped by a
+  per-state fingerprint in the marker so it never loops. Each review still
+  leaves a fresh summary comment, so the PR keeps a running history of verdicts.
 - **Tracks reviewer effectiveness in SQLite.** A bundled `metrics.sh` ledger
   records which panelist raised each synthesized finding, whether the judging
   agent verified it, whether it was posted or already covered, and whether the
